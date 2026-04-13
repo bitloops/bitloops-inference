@@ -1,0 +1,3 @@
+[alias]
+dev-clippy = "clippy --workspace --all-targets -- -D warnings"
+dev-test-fast = "nextest run"

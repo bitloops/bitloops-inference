@@ -1,0 +1,12 @@
+{
+  "model": "qwen2.5-coder:14b",
+  "created_at": "2026-04-13T12:00:00Z",
+  "message": {
+    "role": "assistant",
+    "content": "{\"summary\":\"Uses the local Ollama service\",\"confidence\":0.87}"
+  },
+  "done_reason": "stop",
+  "prompt_eval_count": 14,
+  "eval_count": 6,
+  "done": true
+}

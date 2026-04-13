@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".cargo/config.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/workflows/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".cargo/config.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: ci
+          cache-workspace-crates: true
+      - name: cargo dev-clippy
+        run: cargo dev-clippy
+
+  test:
+    name: Nextest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: ci
+          cache-workspace-crates: true
+      - name: cargo dev-test-fast
+        run: cargo dev-test-fast
+
+  build-smoke:
+    name: Release build smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: ci-build-smoke-${{ matrix.os }}
+          cache-workspace-crates: true
+
+      - name: Build release binary
+        run: cargo build --release -p bitloops-inference
+
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
+        run: ./target/release/bitloops-inference --help >/dev/null
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "target/release/bitloops-inference.exe" --help | Out-Null

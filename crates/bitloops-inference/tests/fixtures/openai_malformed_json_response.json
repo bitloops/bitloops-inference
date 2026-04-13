@@ -1,0 +1,18 @@
+{
+  "id": "chatcmpl-456",
+  "model": "gpt-4.1-mini",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "{\"summary\":\"Broken JSON\",\"confidence\":"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 3,
+    "total_tokens": 13
+  }
+}

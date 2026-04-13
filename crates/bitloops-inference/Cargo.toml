@@ -1,0 +1,20 @@
+[package]
+name = "bitloops-inference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bitloops-inference-protocol.workspace = true
+pico-args.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+mockito.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

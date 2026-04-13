@@ -1,0 +1,18 @@
+{
+  "id": "chatcmpl-123",
+  "model": "gpt-4.1-mini",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "Here is the structured answer:\n{\"summary\":\"Keeps the provider boundary isolated\",\"confidence\":0.94}\nUse that JSON object as the canonical result."
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 9,
+    "total_tokens": 24
+  }
+}
