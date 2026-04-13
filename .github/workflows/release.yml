@@ -12,6 +12,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  RELEASE_VERSION: ${{ github.ref_name }}
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -145,14 +148,14 @@ jobs:
         run: |
           mkdir -p dist/package
           cp "target/${{ matrix.target }}/release/bitloops-inference" dist/package/bitloops-inference
-          tar -C dist/package -czf "dist/bitloops-inference-${{ matrix.target }}.tar.gz" bitloops-inference
+          tar -C dist/package -czf "dist/bitloops-inference-${{ env.RELEASE_VERSION }}-${{ matrix.target }}.tar.gz" bitloops-inference
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist/package
           cp "target/${{ matrix.target }}/release/bitloops-inference" dist/package/bitloops-inference
-          ditto -c -k --keepParent dist/package "dist/bitloops-inference-${{ matrix.target }}.zip"
+          ditto -c -k --keepParent dist/package "dist/bitloops-inference-${{ env.RELEASE_VERSION }}-${{ matrix.target }}.zip"
 
       - name: Restore App Store Connect key
         if: runner.os == 'macOS'
@@ -167,7 +170,7 @@ jobs:
           APPSTORE_CONNECT_KEY_ID: ${{ vars.APPSTORE_CONNECT_KEY_ID }}
           APPSTORE_CONNECT_ISSUER_ID: ${{ vars.APPSTORE_CONNECT_ISSUER_ID }}
         run: |
-          xcrun notarytool submit "dist/bitloops-inference-${{ matrix.target }}.zip" \
+          xcrun notarytool submit "dist/bitloops-inference-${{ env.RELEASE_VERSION }}-${{ matrix.target }}.zip" \
             --key AuthKey.p8 \
             --key-id "$APPSTORE_CONNECT_KEY_ID" \
             --issuer "$APPSTORE_CONNECT_ISSUER_ID" \
@@ -179,13 +182,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist/package -Force | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/bitloops-inference.exe" "dist/package/bitloops-inference.exe" -Force
-          Compress-Archive -Path dist/package/* -DestinationPath "dist/bitloops-inference-${{ matrix.target }}.zip"
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/bitloops-inference-${{ env.RELEASE_VERSION }}-${{ matrix.target }}.zip"
 
       - name: Upload build artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
-          path: dist/bitloops-inference-${{ matrix.target }}.*
+          path: dist/bitloops-inference-${{ env.RELEASE_VERSION }}-${{ matrix.target }}.*
 
   publish:
     name: Publish release
@@ -197,7 +200,7 @@ jobs:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     steps:
       - name: Download packaged artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -205,14 +208,34 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum bitloops-inference-* > checksums-sha256.txt
+          sha256sum bitloops-inference-${{ env.RELEASE_VERSION }}-* > checksums-sha256.txt
+
+      - name: Remove stale release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          gh release view "${{ github.ref_name }}" --json assets --jq '.assets[].name' |
+            while IFS= read -r asset; do
+              case "$asset" in
+                bitloops-inference-${{ env.RELEASE_VERSION }}-*)
+                  ;;
+                bitloops-inference-*)
+                  gh release delete-asset "${{ github.ref_name }}" "$asset" --yes
+                  ;;
+              esac
+            done
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          overwrite_files: true
           files: |
-            dist/bitloops-inference-*
+            dist/bitloops-inference-${{ env.RELEASE_VERSION }}-*
             dist/checksums-sha256.txt
 
       - name: Send Slack notification
