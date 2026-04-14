@@ -23,32 +23,35 @@ bitloops-inference describe-profile --config config.toml --profile openai_fast
 
 ## Config
 
-Profiles are defined under `[inference.profiles.<name>]`.
+`bitloops-inference` reads the Bitloops daemon inference config. Text-generation profiles live under `[inference.profiles.<name>]` and reference a runtime from `[inference.runtimes.<name>]`.
 
 ```toml
+[inference.runtimes.bitloops_inference]
+request_timeout_secs = 60
+
 [inference.profiles.openai_fast]
-kind = "openai_chat_completions"
-provider_name = "openai"
+task = "text_generation"
+driver = "openai_chat_completions"
+runtime = "bitloops_inference"
 model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1/chat/completions"
 api_key = "${OPENAI_API_KEY}"
-temperature = 0.1
-timeout_secs = 60
+temperature = "0.1"
 max_output_tokens = 200
 
 [inference.profiles.ollama_local]
-kind = "ollama_chat"
-provider_name = "ollama"
+task = "text_generation"
+driver = "ollama_chat"
+runtime = "bitloops_inference"
 model = "qwen2.5-coder:14b"
 base_url = "http://127.0.0.1:11434/api/chat"
-temperature = 0.1
-timeout_secs = 120
+temperature = "0.1"
 max_output_tokens = 200
 ```
 
-String fields support `${ENV_VAR}` interpolation. Missing environment variables fail validation immediately.
+String fields support `${ENV_VAR}` interpolation. Missing environment variables fail validation immediately. Non-text-generation profiles in the same daemon config are ignored by `bitloops-inference`.
 
-## Supported provider kinds
+## Supported drivers
 
 - `openai_chat_completions`
 - `ollama_chat`
@@ -83,19 +86,19 @@ Example responses:
 Run config validation first:
 
 ```bash
-cargo run -p bitloops-inference -- validate-config --config ./config.toml
+cargo run -p bitloops-inference -- validate-config --config ./bitloops-daemon-config.toml
 ```
 
 Describe a profile:
 
 ```bash
-cargo run -p bitloops-inference -- describe-profile --config ./config.toml --profile ollama_local
+cargo run -p bitloops-inference -- describe-profile --config ./bitloops-daemon-config.toml --profile ollama_local
 ```
 
 Start the stdio runtime:
 
 ```bash
-cargo run -p bitloops-inference -- run --config ./config.toml --profile ollama_local
+cargo run -p bitloops-inference -- run --config ./bitloops-daemon-config.toml --profile ollama_local
 ```
 
 You can then write protocol lines to `stdin` manually or from another process.

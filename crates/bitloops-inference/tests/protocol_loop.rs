@@ -16,6 +16,43 @@ use mockito::Server;
 
 use common::write_config;
 
+fn openai_config(base_url: &str, request_timeout_secs: u64) -> String {
+    format!(
+        r#"
+            [inference.runtimes.bitloops_inference]
+            request_timeout_secs = {request_timeout_secs}
+
+            [inference.profiles.openai_fast]
+            task = "text_generation"
+            driver = "openai_chat_completions"
+            runtime = "bitloops_inference"
+            model = "gpt-4.1-mini"
+            base_url = "{base_url}"
+            api_key = "secret"
+            temperature = "0.1"
+            max_output_tokens = 200
+        "#
+    )
+}
+
+fn ollama_config(base_url: &str, request_timeout_secs: u64) -> String {
+    format!(
+        r#"
+            [inference.runtimes.bitloops_inference]
+            request_timeout_secs = {request_timeout_secs}
+
+            [inference.profiles.ollama_local]
+            task = "text_generation"
+            driver = "ollama_chat"
+            runtime = "bitloops_inference"
+            model = "qwen2.5-coder:14b"
+            base_url = "{base_url}"
+            temperature = "0.1"
+            max_output_tokens = 200
+        "#
+    )
+}
+
 #[test]
 fn openai_runtime_handles_describe_infer_and_shutdown() {
     let mut server = Server::new();
@@ -27,19 +64,9 @@ fn openai_runtime_handles_describe_infer_and_shutdown() {
         .with_body(fixture)
         .create();
 
-    let config = write_config(&format!(
-        r#"
-            [inference.profiles.openai_fast]
-            kind = "openai_chat_completions"
-            provider_name = "openai"
-            model = "gpt-4.1-mini"
-            base_url = "{}/v1/chat/completions"
-            api_key = "secret"
-            temperature = 0.1
-            timeout_secs = 60
-            max_output_tokens = 200
-        "#,
-        server.url()
+    let config = write_config(&openai_config(
+        &format!("{}/v1/chat/completions", server.url()),
+        60,
     ));
 
     let mut runtime = RuntimeHarness::spawn(config.path(), "openai_fast");
@@ -102,19 +129,7 @@ fn ollama_runtime_handles_infer_and_shutdown() {
         .with_body(fixture)
         .create();
 
-    let config = write_config(&format!(
-        r#"
-            [inference.profiles.ollama_local]
-            kind = "ollama_chat"
-            provider_name = "ollama"
-            model = "qwen2.5-coder:14b"
-            base_url = "{}/api/chat"
-            temperature = 0.1
-            timeout_secs = 60
-            max_output_tokens = 200
-        "#,
-        server.url()
-    ));
+    let config = write_config(&ollama_config(&format!("{}/api/chat", server.url()), 60));
 
     let mut runtime = RuntimeHarness::spawn(config.path(), "ollama_local");
     runtime.send(&RequestEnvelope {
@@ -162,19 +177,9 @@ fn http_errors_are_normalised() {
         .with_body(fixture)
         .create();
 
-    let config = write_config(&format!(
-        r#"
-            [inference.profiles.openai_fast]
-            kind = "openai_chat_completions"
-            provider_name = "openai"
-            model = "gpt-4.1-mini"
-            base_url = "{}/v1/chat/completions"
-            api_key = "secret"
-            temperature = 0.1
-            timeout_secs = 60
-            max_output_tokens = 200
-        "#,
-        server.url()
+    let config = write_config(&openai_config(
+        &format!("{}/v1/chat/completions", server.url()),
+        60,
     ));
 
     let mut runtime = RuntimeHarness::spawn(config.path(), "openai_fast");
@@ -214,19 +219,9 @@ fn malformed_json_object_is_reported() {
         .with_body(fixture)
         .create();
 
-    let config = write_config(&format!(
-        r#"
-            [inference.profiles.openai_fast]
-            kind = "openai_chat_completions"
-            provider_name = "openai"
-            model = "gpt-4.1-mini"
-            base_url = "{}/v1/chat/completions"
-            api_key = "secret"
-            temperature = 0.1
-            timeout_secs = 60
-            max_output_tokens = 200
-        "#,
-        server.url()
+    let config = write_config(&openai_config(
+        &format!("{}/v1/chat/completions", server.url()),
+        60,
     ));
 
     let mut runtime = RuntimeHarness::spawn(config.path(), "openai_fast");
@@ -258,19 +253,7 @@ fn malformed_json_object_is_reported() {
 #[test]
 fn timeouts_are_normalised() {
     let (url, handle) = start_slow_http_server(Duration::from_secs(3));
-    let config = write_config(&format!(
-        r#"
-            [inference.profiles.openai_fast]
-            kind = "openai_chat_completions"
-            provider_name = "openai"
-            model = "gpt-4.1-mini"
-            base_url = "{url}"
-            api_key = "secret"
-            temperature = 0.1
-            timeout_secs = 1
-            max_output_tokens = 200
-        "#
-    ));
+    let config = write_config(&openai_config(&url, 1));
 
     let mut runtime = RuntimeHarness::spawn(config.path(), "openai_fast");
     runtime.send(&RequestEnvelope {

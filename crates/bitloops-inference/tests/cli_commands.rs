@@ -7,26 +7,35 @@ use serde_json::Value;
 use common::write_config;
 
 #[test]
-fn validate_config_reports_profile_names() {
+fn validate_config_reports_text_generation_profile_names() {
     let config = write_config(
         r#"
+            [inference.runtimes.bitloops_inference]
+            request_timeout_secs = 60
+
+            [inference.profiles.local_code]
+            task = "embeddings"
+            driver = "ollama_embeddings"
+            model = "nomic-embed-text"
+            base_url = "http://127.0.0.1:11434/api/embed"
+
             [inference.profiles.openai_fast]
-            kind = "openai_chat_completions"
-            provider_name = "openai"
+            task = "text_generation"
+            driver = "openai_chat_completions"
+            runtime = "bitloops_inference"
             model = "gpt-4.1-mini"
             base_url = "https://example.com/v1/chat/completions"
             api_key = "secret"
-            temperature = 0.1
-            timeout_secs = 60
+            temperature = "0.1"
             max_output_tokens = 200
 
             [inference.profiles.ollama_local]
-            kind = "ollama_chat"
-            provider_name = "ollama"
+            task = "text_generation"
+            driver = "ollama_chat"
+            runtime = "bitloops_inference"
             model = "qwen2.5-coder:14b"
             base_url = "http://127.0.0.1:11434/api/chat"
-            temperature = 0.1
-            timeout_secs = 120
+            temperature = "0.1"
             max_output_tokens = 200
         "#,
     );
@@ -50,14 +59,17 @@ fn validate_config_reports_profile_names() {
 fn describe_profile_returns_protocol_shaped_json() {
     let config = write_config(
         r#"
+            [inference.runtimes.bitloops_inference]
+            request_timeout_secs = 60
+
             [inference.profiles.openai_fast]
-            kind = "openai_chat_completions"
-            provider_name = "openai"
+            task = "text_generation"
+            driver = "openai_chat_completions"
+            runtime = "bitloops_inference"
             model = "gpt-4.1-mini"
             base_url = "https://example.com/v1/chat/completions"
             api_key = "secret"
-            temperature = 0.1
-            timeout_secs = 60
+            temperature = "0.1"
             max_output_tokens = 200
         "#,
     );

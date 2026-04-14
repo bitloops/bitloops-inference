@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use bitloops_inference_protocol::ProviderKind;
 use serde::Deserialize;
 use thiserror::Error;
+use toml::{Table, Value};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InferenceConfig {
@@ -37,7 +38,7 @@ impl InferenceConfig {
         lookup: &impl Fn(&str) -> Option<String>,
     ) -> Result<Self, ConfigError> {
         let mut value = content
-            .parse::<toml::Value>()
+            .parse::<Value>()
             .map_err(|source| ConfigError::Parse {
                 path: path.to_path_buf(),
                 source,
@@ -51,13 +52,19 @@ impl InferenceConfig {
 
         let mut profiles = BTreeMap::new();
         for (name, raw_profile) in raw.inference.profiles {
-            let profile = ProfileConfig::from_raw(&name, raw_profile)?;
+            reject_legacy_profile_fields(&name, &raw_profile)?;
+            let task = required_profile_string(&name, &raw_profile, "task")?;
+            if task != "text_generation" {
+                continue;
+            }
+
+            let profile = ProfileConfig::from_table(&name, &raw_profile, &raw.inference.runtimes)?;
             profiles.insert(name, profile);
         }
 
         if profiles.is_empty() {
             return Err(ConfigError::Validation(
-                "config must define at least one profile under [inference.profiles.<name>]"
+                "config must define at least one text_generation profile under [inference.profiles.<name>]"
                     .to_owned(),
             ));
         }
@@ -79,56 +86,228 @@ pub struct ProfileConfig {
 }
 
 impl ProfileConfig {
-    fn from_raw(profile_name: &str, raw: RawProfileConfig) -> Result<Self, ConfigError> {
-        let provider_name = validate_non_empty(profile_name, "provider_name", raw.provider_name)?;
-        let model = validate_non_empty(profile_name, "model", raw.model)?;
-        let base_url = validate_non_empty(profile_name, "base_url", raw.base_url)?;
+    fn from_table(
+        profile_name: &str,
+        raw: &Table,
+        runtimes: &BTreeMap<String, RawRuntimeConfig>,
+    ) -> Result<Self, ConfigError> {
+        ensure_only_allowed_fields(
+            profile_name,
+            raw,
+            &[
+                "task",
+                "driver",
+                "runtime",
+                "model",
+                "base_url",
+                "api_key",
+                "temperature",
+                "max_output_tokens",
+            ],
+        )?;
 
-        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        let task = required_profile_string(profile_name, raw, "task")?;
+        if task != "text_generation" {
             return Err(ConfigError::Validation(format!(
-                "profile '{profile_name}' field 'base_url' must start with http:// or https://"
+                "profile '{profile_name}' field 'task' must be 'text_generation'"
             )));
         }
 
-        let api_key = match raw.api_key {
-            Some(api_key) => Some(validate_non_empty(profile_name, "api_key", api_key)?),
-            None => None,
-        };
+        let driver = required_profile_string(profile_name, raw, "driver")?;
+        let (kind, provider_name) = provider_for_driver(profile_name, &driver)?;
 
-        if let Some(temperature) = raw.temperature
-            && (!temperature.is_finite() || temperature < 0.0)
-        {
+        let model = required_profile_string(profile_name, raw, "model")?;
+        let base_url = required_profile_string(profile_name, raw, "base_url")?;
+        validate_http_url(profile_name, "base_url", &base_url)?;
+
+        if kind == ProviderKind::OllamaChat && !is_ollama_chat_endpoint(&base_url) {
+            return Err(ConfigError::Validation(format!(
+                "profile '{profile_name}' field 'base_url' must target the Ollama chat endpoint '/api/chat'"
+            )));
+        }
+
+        let api_key = optional_profile_string(profile_name, raw, "api_key")?;
+        let temperature = required_profile_f32(profile_name, raw, "temperature")?;
+        if !temperature.is_finite() || temperature < 0.0 {
             return Err(ConfigError::Validation(format!(
                 "profile '{profile_name}' field 'temperature' must be a finite value greater than or equal to 0"
             )));
         }
 
-        if let Some(max_output_tokens) = raw.max_output_tokens
-            && max_output_tokens == 0
-        {
+        let max_output_tokens = required_profile_u32(profile_name, raw, "max_output_tokens")?;
+        if max_output_tokens == 0 {
             return Err(ConfigError::Validation(format!(
                 "profile '{profile_name}' field 'max_output_tokens' must be greater than 0"
             )));
         }
 
-        let timeout_secs = raw.timeout_secs.unwrap_or(60);
+        let runtime_name = required_profile_string(profile_name, raw, "runtime")?;
+        let runtime = runtimes.get(&runtime_name).ok_or_else(|| {
+            ConfigError::Validation(format!(
+                "profile '{profile_name}' references unknown runtime '{runtime_name}'"
+            ))
+        })?;
+        let timeout_secs = runtime.request_timeout_secs.ok_or_else(|| {
+            ConfigError::Validation(format!(
+                "runtime '{runtime_name}' field 'request_timeout_secs' is required by profile '{profile_name}'"
+            ))
+        })?;
         if timeout_secs == 0 {
             return Err(ConfigError::Validation(format!(
-                "profile '{profile_name}' field 'timeout_secs' must be greater than 0"
+                "runtime '{runtime_name}' field 'request_timeout_secs' must be greater than 0"
             )));
         }
 
         Ok(Self {
-            kind: raw.kind,
+            kind,
             provider_name,
             model,
             base_url,
             api_key,
-            temperature: raw.temperature,
+            temperature: Some(temperature),
             timeout_secs,
-            max_output_tokens: raw.max_output_tokens,
+            max_output_tokens: Some(max_output_tokens),
         })
     }
+}
+
+fn provider_for_driver(
+    profile_name: &str,
+    driver: &str,
+) -> Result<(ProviderKind, String), ConfigError> {
+    match driver {
+        "ollama_chat" => Ok((ProviderKind::OllamaChat, "ollama".to_owned())),
+        "openai_chat_completions" => Ok((ProviderKind::OpenAiChatCompletions, "openai".to_owned())),
+        other => Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field 'driver' has unsupported value '{other}'"
+        ))),
+    }
+}
+
+fn reject_legacy_profile_fields(profile_name: &str, table: &Table) -> Result<(), ConfigError> {
+    let legacy_fields: Vec<&str> = ["kind", "provider_name", "timeout_secs"]
+        .into_iter()
+        .filter(|field| table.contains_key(*field))
+        .collect();
+
+    if legacy_fields.is_empty() {
+        return Ok(());
+    }
+
+    Err(ConfigError::Validation(format!(
+        "profile '{profile_name}' uses legacy inference field(s): {}; bitloops-inference now expects the Bitloops daemon schema with [inference.runtimes.<name>] and [inference.profiles.<name>]",
+        legacy_fields.join(", ")
+    )))
+}
+
+fn ensure_only_allowed_fields(
+    profile_name: &str,
+    table: &Table,
+    allowed_fields: &[&str],
+) -> Result<(), ConfigError> {
+    let allowed: BTreeSet<&str> = allowed_fields.iter().copied().collect();
+    let unsupported: Vec<&str> = table
+        .keys()
+        .map(String::as_str)
+        .filter(|field| !allowed.contains(*field))
+        .collect();
+
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+
+    Err(ConfigError::Validation(format!(
+        "profile '{profile_name}' contains unsupported field(s): {}; supported fields are {}",
+        unsupported.join(", "),
+        allowed_fields.join(", ")
+    )))
+}
+
+fn required_profile_string(
+    profile_name: &str,
+    table: &Table,
+    field_name: &str,
+) -> Result<String, ConfigError> {
+    let value = table.get(field_name).ok_or_else(|| {
+        ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' is required"
+        ))
+    })?;
+    let Some(value) = value.as_str() else {
+        return Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' must be a string"
+        )));
+    };
+    validate_non_empty(profile_name, field_name, value.to_owned())
+}
+
+fn optional_profile_string(
+    profile_name: &str,
+    table: &Table,
+    field_name: &str,
+) -> Result<Option<String>, ConfigError> {
+    let Some(value) = table.get(field_name) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' must be a string"
+        )));
+    };
+    Ok(Some(validate_non_empty(
+        profile_name,
+        field_name,
+        value.to_owned(),
+    )?))
+}
+
+fn required_profile_f32(
+    profile_name: &str,
+    table: &Table,
+    field_name: &str,
+) -> Result<f32, ConfigError> {
+    let value = table.get(field_name).ok_or_else(|| {
+        ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' is required"
+        ))
+    })?;
+
+    match value {
+        Value::Float(number) => Ok(*number as f32),
+        Value::Integer(number) => Ok(*number as f32),
+        Value::String(raw) => raw.trim().parse::<f32>().map_err(|_| {
+            ConfigError::Validation(format!(
+                "profile '{profile_name}' field '{field_name}' must be a valid number"
+            ))
+        }),
+        _ => Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' must be a string or number"
+        ))),
+    }
+}
+
+fn required_profile_u32(
+    profile_name: &str,
+    table: &Table,
+    field_name: &str,
+) -> Result<u32, ConfigError> {
+    let value = table.get(field_name).ok_or_else(|| {
+        ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' is required"
+        ))
+    })?;
+
+    let Some(number) = value.as_integer() else {
+        return Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' must be an integer"
+        )));
+    };
+
+    u32::try_from(number).map_err(|_| {
+        ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' must fit within a u32"
+        ))
+    })
 }
 
 fn validate_non_empty(
@@ -146,22 +325,36 @@ fn validate_non_empty(
     Ok(trimmed.to_owned())
 }
 
+fn validate_http_url(profile_name: &str, field_name: &str, value: &str) -> Result<(), ConfigError> {
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Ok(());
+    }
+
+    Err(ConfigError::Validation(format!(
+        "profile '{profile_name}' field '{field_name}' must start with http:// or https://"
+    )))
+}
+
+fn is_ollama_chat_endpoint(base_url: &str) -> bool {
+    base_url.trim_end_matches('/').ends_with("/api/chat")
+}
+
 fn interpolate_toml_value(
-    value: &mut toml::Value,
+    value: &mut Value,
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<(), ConfigError> {
     match value {
-        toml::Value::String(content) => {
+        Value::String(content) => {
             *content = interpolate_string(content, lookup)?;
             Ok(())
         }
-        toml::Value::Array(items) => {
+        Value::Array(items) => {
             for item in items {
                 interpolate_toml_value(item, lookup)?;
             }
             Ok(())
         }
-        toml::Value::Table(table) => {
+        Value::Table(table) => {
             for (_, item) in table.iter_mut() {
                 interpolate_toml_value(item, lookup)?;
             }
@@ -215,25 +408,18 @@ struct RawConfig {
     inference: RawInferenceConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct RawInferenceConfig {
-    profiles: BTreeMap<String, RawProfileConfig>,
+    #[serde(default)]
+    runtimes: BTreeMap<String, RawRuntimeConfig>,
+    #[serde(default)]
+    profiles: BTreeMap<String, Table>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawProfileConfig {
-    kind: ProviderKind,
-    provider_name: String,
-    model: String,
-    base_url: String,
+#[derive(Debug, Default, Deserialize)]
+struct RawRuntimeConfig {
     #[serde(default)]
-    api_key: Option<String>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
-    #[serde(default)]
-    max_output_tokens: Option<u32>,
+    request_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -268,40 +454,65 @@ mod tests {
     }
 
     #[test]
-    fn interpolates_environment_variables_in_string_fields() {
+    fn interpolates_environment_variables_in_daemon_style_config() {
         let config = parse_config(
             r#"
-                [inference.profiles.openai_fast]
-                kind = "openai_chat_completions"
-                provider_name = "openai"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 120
+
+                [inference.profiles.local_code]
+                task = "embeddings"
+                driver = "ollama_embeddings"
+                model = "nomic-embed-text"
+                base_url = "http://127.0.0.1:11434/api/embed"
+
+                [inference.profiles.summary_local]
+                task = "text_generation"
+                driver = "openai_chat_completions"
+                runtime = "bitloops_inference"
                 model = "gpt-4.1-mini"
                 base_url = "${BASE_URL}/v1/chat/completions"
                 api_key = "${API_KEY}"
-                temperature = 0.1
+                temperature = "${TEMPERATURE}"
                 max_output_tokens = 200
             "#,
             &|name| match name {
                 "BASE_URL" => Some("https://example.com".to_owned()),
                 "API_KEY" => Some("secret".to_owned()),
+                "TEMPERATURE" => Some("0.1".to_owned()),
                 _ => None,
             },
         )
         .expect("config should parse");
 
-        let profile = config.profile("openai_fast").expect("profile should exist");
+        let profile = config
+            .profile("summary_local")
+            .expect("profile should exist");
+        assert_eq!(config.profile_names(), vec!["summary_local".to_owned()]);
+        assert_eq!(profile.kind, ProviderKind::OpenAiChatCompletions);
+        assert_eq!(profile.provider_name, "openai");
         assert_eq!(profile.base_url, "https://example.com/v1/chat/completions");
         assert_eq!(profile.api_key.as_deref(), Some("secret"));
+        assert_eq!(profile.temperature, Some(0.1));
+        assert_eq!(profile.timeout_secs, 120);
+        assert_eq!(profile.max_output_tokens, Some(200));
     }
 
     #[test]
     fn fails_when_environment_variable_is_missing() {
         let error = parse_config(
             r#"
-                [inference.profiles.ollama_local]
-                kind = "ollama_chat"
-                provider_name = "ollama"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 120
+
+                [inference.profiles.summary_local]
+                task = "text_generation"
+                driver = "ollama_chat"
+                runtime = "bitloops_inference"
                 model = "qwen2.5-coder:14b"
                 base_url = "${OLLAMA_URL}/api/chat"
+                temperature = "0.1"
+                max_output_tokens = 200
             "#,
             &|_| None,
         )
@@ -315,20 +526,99 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_timeout() {
+    fn rejects_legacy_profile_schema() {
         let error = parse_config(
             r#"
-                [inference.profiles.openai_fast]
-                kind = "openai_chat_completions"
-                provider_name = "openai"
-                model = "gpt-4.1-mini"
-                base_url = "https://example.com/v1/chat/completions"
-                timeout_secs = 0
+                [inference.profiles.summary_local]
+                kind = "ollama_chat"
+                provider_name = "ollama"
+                model = "qwen2.5-coder:14b"
+                base_url = "http://127.0.0.1:11434/api/chat"
+                timeout_secs = 120
+                temperature = 0.1
+                max_output_tokens = 200
             "#,
             &|_| None,
         )
         .expect_err("config should fail");
 
-        assert!(error.to_string().contains("timeout_secs"));
+        assert!(error.to_string().contains("legacy inference field"));
+    }
+
+    #[test]
+    fn rejects_missing_runtime_reference() {
+        let error = parse_config(
+            r#"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 120
+
+                [inference.profiles.summary_local]
+                task = "text_generation"
+                driver = "ollama_chat"
+                runtime = "missing_runtime"
+                model = "qwen2.5-coder:14b"
+                base_url = "http://127.0.0.1:11434/api/chat"
+                temperature = "0.1"
+                max_output_tokens = 200
+            "#,
+            &|_| None,
+        )
+        .expect_err("config should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown runtime 'missing_runtime'")
+        );
+    }
+
+    #[test]
+    fn rejects_zero_runtime_timeout() {
+        let error = parse_config(
+            r#"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 0
+
+                [inference.profiles.summary_local]
+                task = "text_generation"
+                driver = "openai_chat_completions"
+                runtime = "bitloops_inference"
+                model = "gpt-4.1-mini"
+                base_url = "https://example.com/v1/chat/completions"
+                temperature = "0.1"
+                max_output_tokens = 200
+            "#,
+            &|_| None,
+        )
+        .expect_err("config should fail");
+
+        assert!(error.to_string().contains("request_timeout_secs"));
+    }
+
+    #[test]
+    fn rejects_ollama_host_root_url() {
+        let error = parse_config(
+            r#"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 120
+
+                [inference.profiles.summary_local]
+                task = "text_generation"
+                driver = "ollama_chat"
+                runtime = "bitloops_inference"
+                model = "qwen2.5-coder:14b"
+                base_url = "http://127.0.0.1:11434"
+                temperature = "0.1"
+                max_output_tokens = 200
+            "#,
+            &|_| None,
+        )
+        .expect_err("config should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Ollama chat endpoint '/api/chat'")
+        );
     }
 }
