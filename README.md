@@ -51,7 +51,7 @@ max_output_tokens = 200
 
 String fields support `${ENV_VAR}` interpolation. Missing environment variables fail validation immediately. Non-text-generation profiles in the same daemon config are ignored by `bitloops-inference`.
 
-The public Bitloops platform gateway works through the same `openai_chat_completions` driver. Point `base_url` at the gateway’s chat-completions endpoint and set `api_key` to the shared bearer token:
+The public Bitloops platform gateway has a dedicated `bitloops_platform_chat` driver. It defaults to the production Bitloops platform endpoint, and the Bitloops host can optionally provide `base_url` when a test or non-production override is needed:
 
 ```toml
 [inference.runtimes.bitloops_inference]
@@ -59,20 +59,20 @@ request_timeout_secs = 300
 
 [inference.profiles.platform_summary]
 task = "text_generation"
-driver = "openai_chat_completions"
+driver = "bitloops_platform_chat"
 runtime = "bitloops_inference"
 model = "ministral-3-3b-instruct"
-base_url = "https://platform.example.com/v1/chat/completions"
 api_key = "${BITLOOPS_PLATFORM_GATEWAY_TOKEN}"
 temperature = "0.1"
 max_output_tokens = 200
 ```
 
-`bitloops-inference` treats the gateway as another OpenAI-compatible backend. No extra CLI flags, provider kind, or driver name are required.
+If `base_url` is omitted, `bitloops-inference` uses `https://platform.bitloops.net/v1/chat/completions`. When `base_url` is present, it overrides that default for the selected profile.
 
 ## Supported drivers
 
 - `openai_chat_completions`
+- `bitloops_platform_chat`
 - `ollama_chat`
 
 Both providers normalise their outputs into one canonical inference response with `text`, optional `parsed_json`, optional token usage, finish reason, provider name, and model name.
@@ -95,7 +95,7 @@ Example request stream:
 Example responses:
 
 ```json
-{"request_id":"1","type":"describe","protocol_version":1,"runtime_name":"bitloops-inference","runtime_version":"0.1.0","profile_name":"openai_fast","provider":{"kind":"openai_chat_completions","provider_name":"openai","model_name":"gpt-4.1-mini","endpoint":"https://api.openai.com/v1/chat/completions","capabilities":{"response_modes":["text","json_object"],"usage_reporting":true}}}
+{"request_id":"1","type":"describe","protocol_version":1,"runtime_name":"bitloops-inference","runtime_version":"0.1.2","profile_name":"openai_fast","provider":{"kind":"openai_chat_completions","provider_name":"openai","model_name":"gpt-4.1-mini","endpoint":"https://api.openai.com/v1/chat/completions","capabilities":{"response_modes":["text","json_object"],"usage_reporting":true}}}
 {"request_id":"2","type":"infer","text":"{\"summary\":\"Adds provider isolation\",\"confidence\":0.92}","parsed_json":{"summary":"Adds provider isolation","confidence":0.92},"usage":{"prompt_tokens":120,"completion_tokens":24,"total_tokens":144},"finish_reason":"stop","provider_name":"openai","model_name":"gpt-4.1-mini"}
 {"request_id":"3","type":"shutdown"}
 ```

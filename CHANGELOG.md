@@ -1,3 +1,15 @@
+## [0.1.2] - 2026-04-15
+
+### Added
+
+- A dedicated `bitloops_platform_chat` driver for the public Bitloops platform gateway, with a default production chat-completions endpoint and support for per-profile host overrides.
+- CLI and protocol-loop coverage for Bitloops gateway profile descriptions, gateway-specific HTTP error envelopes, and host override handling.
+
+### Changed
+
+- The Bitloops gateway is now identified as provider `bitloops` instead of being configured as a plain `openai_chat_completions` profile, while still using the OpenAI chat-completions provider kind under the hood.
+- The README now documents the dedicated Bitloops gateway driver and lists it alongside the other supported drivers.
+
 ## [0.1.1] - 2026-04-14
 
 ### Added

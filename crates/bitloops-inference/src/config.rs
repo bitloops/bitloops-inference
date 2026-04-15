@@ -7,6 +7,10 @@ use serde::Deserialize;
 use thiserror::Error;
 use toml::{Table, Value};
 
+const BITLOOPS_PLATFORM_CHAT_DRIVER: &str = "bitloops_platform_chat";
+const DEFAULT_BITLOOPS_PLATFORM_CHAT_COMPLETIONS_URL: &str =
+    "https://platform.bitloops.net/v1/chat/completions";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct InferenceConfig {
     profiles: BTreeMap<String, ProfileConfig>,
@@ -114,13 +118,13 @@ impl ProfileConfig {
         }
 
         let driver = required_profile_string(profile_name, raw, "driver")?;
-        let (kind, provider_name) = provider_for_driver(profile_name, &driver)?;
+        let driver_spec = provider_for_driver(profile_name, &driver)?;
 
         let model = required_profile_string(profile_name, raw, "model")?;
-        let base_url = required_profile_string(profile_name, raw, "base_url")?;
+        let base_url = resolve_base_url(profile_name, raw, driver_spec.default_base_url)?;
         validate_http_url(profile_name, "base_url", &base_url)?;
 
-        if kind == ProviderKind::OllamaChat && !is_ollama_chat_endpoint(&base_url) {
+        if driver_spec.kind == ProviderKind::OllamaChat && !is_ollama_chat_endpoint(&base_url) {
             return Err(ConfigError::Validation(format!(
                 "profile '{profile_name}' field 'base_url' must target the Ollama chat endpoint '/api/chat'"
             )));
@@ -159,8 +163,8 @@ impl ProfileConfig {
         }
 
         Ok(Self {
-            kind,
-            provider_name,
+            kind: driver_spec.kind,
+            provider_name: driver_spec.provider_name.to_owned(),
             model,
             base_url,
             api_key,
@@ -171,16 +175,48 @@ impl ProfileConfig {
     }
 }
 
-fn provider_for_driver(
-    profile_name: &str,
-    driver: &str,
-) -> Result<(ProviderKind, String), ConfigError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DriverSpec {
+    kind: ProviderKind,
+    provider_name: &'static str,
+    default_base_url: Option<&'static str>,
+}
+
+fn provider_for_driver(profile_name: &str, driver: &str) -> Result<DriverSpec, ConfigError> {
     match driver {
-        "ollama_chat" => Ok((ProviderKind::OllamaChat, "ollama".to_owned())),
-        "openai_chat_completions" => Ok((ProviderKind::OpenAiChatCompletions, "openai".to_owned())),
+        "ollama_chat" => Ok(DriverSpec {
+            kind: ProviderKind::OllamaChat,
+            provider_name: "ollama",
+            default_base_url: None,
+        }),
+        "openai_chat_completions" => Ok(DriverSpec {
+            kind: ProviderKind::OpenAiChatCompletions,
+            provider_name: "openai",
+            default_base_url: None,
+        }),
+        BITLOOPS_PLATFORM_CHAT_DRIVER => Ok(DriverSpec {
+            kind: ProviderKind::OpenAiChatCompletions,
+            provider_name: "bitloops",
+            default_base_url: Some(DEFAULT_BITLOOPS_PLATFORM_CHAT_COMPLETIONS_URL),
+        }),
         other => Err(ConfigError::Validation(format!(
             "profile '{profile_name}' field 'driver' has unsupported value '{other}'"
         ))),
+    }
+}
+
+fn resolve_base_url(
+    profile_name: &str,
+    table: &Table,
+    default_base_url: Option<&'static str>,
+) -> Result<String, ConfigError> {
+    match table.get("base_url") {
+        Some(_) => required_profile_string(profile_name, table, "base_url"),
+        None => default_base_url.map(str::to_owned).ok_or_else(|| {
+            ConfigError::Validation(format!(
+                "profile '{profile_name}' field 'base_url' is required"
+            ))
+        }),
     }
 }
 
@@ -496,6 +532,73 @@ mod tests {
         assert_eq!(profile.temperature, Some(0.1));
         assert_eq!(profile.timeout_secs, 120);
         assert_eq!(profile.max_output_tokens, Some(200));
+    }
+
+    #[test]
+    fn bitloops_platform_driver_defaults_to_production_gateway() {
+        let config = parse_config(
+            r#"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 300
+
+                [inference.profiles.platform_summary]
+                task = "text_generation"
+                driver = "bitloops_platform_chat"
+                runtime = "bitloops_inference"
+                model = "ministral-3-3b-instruct"
+                api_key = "${BITLOOPS_PLATFORM_GATEWAY_TOKEN}"
+                temperature = "0.1"
+                max_output_tokens = 200
+            "#,
+            &|name| match name {
+                "BITLOOPS_PLATFORM_GATEWAY_TOKEN" => Some("secret".to_owned()),
+                _ => None,
+            },
+        )
+        .expect("config should parse");
+
+        let profile = config
+            .profile("platform_summary")
+            .expect("profile should exist");
+        assert_eq!(profile.kind, ProviderKind::OpenAiChatCompletions);
+        assert_eq!(profile.provider_name, "bitloops");
+        assert_eq!(
+            profile.base_url,
+            DEFAULT_BITLOOPS_PLATFORM_CHAT_COMPLETIONS_URL
+        );
+    }
+
+    #[test]
+    fn bitloops_platform_driver_allows_base_url_override() {
+        let config = parse_config(
+            r#"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 300
+
+                [inference.profiles.platform_summary]
+                task = "text_generation"
+                driver = "bitloops_platform_chat"
+                runtime = "bitloops_inference"
+                model = "ministral-3-3b-instruct"
+                base_url = "https://platform.example.com/v1/chat/completions"
+                api_key = "${BITLOOPS_PLATFORM_GATEWAY_TOKEN}"
+                temperature = "0.1"
+                max_output_tokens = 200
+            "#,
+            &|name| match name {
+                "BITLOOPS_PLATFORM_GATEWAY_TOKEN" => Some("secret".to_owned()),
+                _ => None,
+            },
+        )
+        .expect("config should parse");
+
+        let profile = config
+            .profile("platform_summary")
+            .expect("profile should exist");
+        assert_eq!(
+            profile.base_url,
+            "https://platform.example.com/v1/chat/completions"
+        );
     }
 
     #[test]
