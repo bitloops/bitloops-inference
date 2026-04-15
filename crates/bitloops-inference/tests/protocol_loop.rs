@@ -209,6 +209,55 @@ fn http_errors_are_normalised() {
 }
 
 #[test]
+fn gateway_error_envelopes_are_normalised_as_http_errors() {
+    let mut server = Server::new();
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(502)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+                "request_id": "gateway-1",
+                "error": {
+                    "type": "no_responders",
+                    "message": "no NATS responders were listening on the target subject"
+                }
+            }"#,
+        )
+        .create();
+
+    let config = write_config(&openai_config(
+        &format!("{}/v1/chat/completions", server.url()),
+        60,
+    ));
+
+    let mut runtime = RuntimeHarness::spawn(config.path(), "openai_fast");
+    runtime.send(&RequestEnvelope {
+        request_id: "infer-gateway-http-error".to_owned(),
+        payload: RequestPayload::Infer(InferRequest {
+            system_prompt: "You summarise semantic diffs.".to_owned(),
+            user_prompt: "Summarise this change.".to_owned(),
+            response_mode: ResponseMode::Text,
+            temperature: Some(0.1),
+            max_output_tokens: Some(200),
+            metadata: None,
+        }),
+    });
+    let response = runtime.read();
+    assert_error(response, "provider_http_error");
+
+    runtime.send(&RequestEnvelope {
+        request_id: "shutdown-1".to_owned(),
+        payload: RequestPayload::Shutdown(ShutdownRequest {}),
+    });
+    let shutdown = runtime.read();
+    assert!(matches!(shutdown.payload, ResponsePayload::Shutdown(_)));
+
+    runtime.finish();
+    mock.assert();
+}
+
+#[test]
 fn malformed_json_object_is_reported() {
     let mut server = Server::new();
     let fixture = include_str!("fixtures/openai_malformed_json_response.json");

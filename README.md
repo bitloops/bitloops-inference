@@ -51,6 +51,25 @@ max_output_tokens = 200
 
 String fields support `${ENV_VAR}` interpolation. Missing environment variables fail validation immediately. Non-text-generation profiles in the same daemon config are ignored by `bitloops-inference`.
 
+The public Bitloops platform gateway works through the same `openai_chat_completions` driver. Point `base_url` at the gateway’s chat-completions endpoint and set `api_key` to the shared bearer token:
+
+```toml
+[inference.runtimes.bitloops_inference]
+request_timeout_secs = 300
+
+[inference.profiles.platform_summary]
+task = "text_generation"
+driver = "openai_chat_completions"
+runtime = "bitloops_inference"
+model = "ministral-3-3b-instruct"
+base_url = "https://platform.example.com/v1/chat/completions"
+api_key = "${BITLOOPS_PLATFORM_GATEWAY_TOKEN}"
+temperature = "0.1"
+max_output_tokens = 200
+```
+
+`bitloops-inference` treats the gateway as another OpenAI-compatible backend. No extra CLI flags, provider kind, or driver name are required.
+
 ## Supported drivers
 
 - `openai_chat_completions`

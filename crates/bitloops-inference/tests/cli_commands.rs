@@ -101,3 +101,56 @@ fn describe_profile_returns_protocol_shaped_json() {
         other => panic!("expected describe response, got {other:?}"),
     }
 }
+
+#[test]
+fn describe_profile_preserves_gateway_endpoint_for_openai_driver() {
+    let config = write_config(
+        r#"
+            [inference.runtimes.bitloops_inference]
+            request_timeout_secs = 300
+
+            [inference.profiles.platform_summary]
+            task = "text_generation"
+            driver = "openai_chat_completions"
+            runtime = "bitloops_inference"
+            model = "ministral-3-3b-instruct"
+            base_url = "https://platform.example.com/v1/chat/completions"
+            api_key = "${BITLOOPS_PLATFORM_GATEWAY_TOKEN}"
+            temperature = "0.1"
+            max_output_tokens = 200
+        "#,
+    );
+
+    unsafe {
+        std::env::set_var("BITLOOPS_PLATFORM_GATEWAY_TOKEN", "secret");
+    }
+
+    let output = Command::cargo_bin("bitloops-inference")
+        .expect("binary should exist")
+        .arg("describe-profile")
+        .arg("--config")
+        .arg(config.path())
+        .arg("--profile")
+        .arg("platform_summary")
+        .output()
+        .expect("command should run");
+
+    assert!(output.status.success());
+    let response = ResponseEnvelope::from_json_line(
+        String::from_utf8(output.stdout)
+            .expect("stdout should be utf-8")
+            .trim_end(),
+    )
+    .expect("response should parse");
+
+    match response.payload {
+        ResponsePayload::Describe(describe) => {
+            assert_eq!(describe.profile_name, "platform_summary");
+            assert_eq!(
+                describe.provider.endpoint,
+                "https://platform.example.com/v1/chat/completions"
+            );
+        }
+        other => panic!("expected describe response, got {other:?}"),
+    }
+}
