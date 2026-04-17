@@ -1,3 +1,13 @@
+## [0.1.3] - 2026-04-17
+
+### Added
+
+Added test for optional API key environment variable in profile configuration.
+
+### Changed
+
+Refactored inference configuration to support lookup function for profile fields and enhance error handling.
+
 ## [0.1.2] - 2026-04-15
 
 ### Added
