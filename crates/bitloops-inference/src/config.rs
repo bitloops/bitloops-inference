@@ -41,13 +41,12 @@ impl InferenceConfig {
         content: &str,
         lookup: &impl Fn(&str) -> Option<String>,
     ) -> Result<Self, ConfigError> {
-        let mut value = content
+        let value = content
             .parse::<Value>()
             .map_err(|source| ConfigError::Parse {
                 path: path.to_path_buf(),
                 source,
             })?;
-        interpolate_toml_value(&mut value, lookup)?;
 
         let raw: RawConfig = value.try_into().map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
@@ -57,12 +56,13 @@ impl InferenceConfig {
         let mut profiles = BTreeMap::new();
         for (name, raw_profile) in raw.inference.profiles {
             reject_legacy_profile_fields(&name, &raw_profile)?;
-            let task = required_profile_string(&name, &raw_profile, "task")?;
+            let task = required_profile_string(&name, &raw_profile, "task", lookup)?;
             if task != "text_generation" {
                 continue;
             }
 
-            let profile = ProfileConfig::from_table(&name, &raw_profile, &raw.inference.runtimes)?;
+            let profile =
+                ProfileConfig::from_table(&name, &raw_profile, &raw.inference.runtimes, lookup)?;
             profiles.insert(name, profile);
         }
 
@@ -90,11 +90,15 @@ pub struct ProfileConfig {
 }
 
 impl ProfileConfig {
-    fn from_table(
+    fn from_table<F>(
         profile_name: &str,
         raw: &Table,
         runtimes: &BTreeMap<String, RawRuntimeConfig>,
-    ) -> Result<Self, ConfigError> {
+        lookup: &F,
+    ) -> Result<Self, ConfigError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         ensure_only_allowed_fields(
             profile_name,
             raw,
@@ -110,18 +114,18 @@ impl ProfileConfig {
             ],
         )?;
 
-        let task = required_profile_string(profile_name, raw, "task")?;
+        let task = required_profile_string(profile_name, raw, "task", lookup)?;
         if task != "text_generation" {
             return Err(ConfigError::Validation(format!(
                 "profile '{profile_name}' field 'task' must be 'text_generation'"
             )));
         }
 
-        let driver = required_profile_string(profile_name, raw, "driver")?;
+        let driver = required_profile_string(profile_name, raw, "driver", lookup)?;
         let driver_spec = provider_for_driver(profile_name, &driver)?;
 
-        let model = required_profile_string(profile_name, raw, "model")?;
-        let base_url = resolve_base_url(profile_name, raw, driver_spec.default_base_url)?;
+        let model = required_profile_string(profile_name, raw, "model", lookup)?;
+        let base_url = resolve_base_url(profile_name, raw, driver_spec.default_base_url, lookup)?;
         validate_http_url(profile_name, "base_url", &base_url)?;
 
         if driver_spec.kind == ProviderKind::OllamaChat && !is_ollama_chat_endpoint(&base_url) {
@@ -130,22 +134,23 @@ impl ProfileConfig {
             )));
         }
 
-        let api_key = optional_profile_string(profile_name, raw, "api_key")?;
-        let temperature = required_profile_f32(profile_name, raw, "temperature")?;
+        let api_key = optional_profile_string(profile_name, raw, "api_key", lookup)?;
+        let temperature = required_profile_f32(profile_name, raw, "temperature", lookup)?;
         if !temperature.is_finite() || temperature < 0.0 {
             return Err(ConfigError::Validation(format!(
                 "profile '{profile_name}' field 'temperature' must be a finite value greater than or equal to 0"
             )));
         }
 
-        let max_output_tokens = required_profile_u32(profile_name, raw, "max_output_tokens")?;
+        let max_output_tokens =
+            required_profile_u32(profile_name, raw, "max_output_tokens", lookup)?;
         if max_output_tokens == 0 {
             return Err(ConfigError::Validation(format!(
                 "profile '{profile_name}' field 'max_output_tokens' must be greater than 0"
             )));
         }
 
-        let runtime_name = required_profile_string(profile_name, raw, "runtime")?;
+        let runtime_name = required_profile_string(profile_name, raw, "runtime", lookup)?;
         let runtime = runtimes.get(&runtime_name).ok_or_else(|| {
             ConfigError::Validation(format!(
                 "profile '{profile_name}' references unknown runtime '{runtime_name}'"
@@ -209,9 +214,10 @@ fn resolve_base_url(
     profile_name: &str,
     table: &Table,
     default_base_url: Option<&'static str>,
+    lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<String, ConfigError> {
     match table.get("base_url") {
-        Some(_) => required_profile_string(profile_name, table, "base_url"),
+        Some(_) => required_profile_string(profile_name, table, "base_url", lookup),
         None => default_base_url.map(str::to_owned).ok_or_else(|| {
             ConfigError::Validation(format!(
                 "profile '{profile_name}' field 'base_url' is required"
@@ -263,6 +269,7 @@ fn required_profile_string(
     profile_name: &str,
     table: &Table,
     field_name: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<String, ConfigError> {
     let value = table.get(field_name).ok_or_else(|| {
         ConfigError::Validation(format!(
@@ -274,13 +281,15 @@ fn required_profile_string(
             "profile '{profile_name}' field '{field_name}' must be a string"
         )));
     };
-    validate_non_empty(profile_name, field_name, value.to_owned())
+    let value = interpolate_string(value, lookup)?;
+    validate_non_empty(profile_name, field_name, value)
 }
 
 fn optional_profile_string(
     profile_name: &str,
     table: &Table,
     field_name: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<Option<String>, ConfigError> {
     let Some(value) = table.get(field_name) else {
         return Ok(None);
@@ -290,17 +299,17 @@ fn optional_profile_string(
             "profile '{profile_name}' field '{field_name}' must be a string"
         )));
     };
-    Ok(Some(validate_non_empty(
-        profile_name,
-        field_name,
-        value.to_owned(),
-    )?))
+    let Some(value) = interpolate_optional_string(value, lookup)? else {
+        return Ok(None);
+    };
+    Ok(Some(validate_non_empty(profile_name, field_name, value)?))
 }
 
 fn required_profile_f32(
     profile_name: &str,
     table: &Table,
     field_name: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<f32, ConfigError> {
     let value = table.get(field_name).ok_or_else(|| {
         ConfigError::Validation(format!(
@@ -311,11 +320,14 @@ fn required_profile_f32(
     match value {
         Value::Float(number) => Ok(*number as f32),
         Value::Integer(number) => Ok(*number as f32),
-        Value::String(raw) => raw.trim().parse::<f32>().map_err(|_| {
-            ConfigError::Validation(format!(
-                "profile '{profile_name}' field '{field_name}' must be a valid number"
-            ))
-        }),
+        Value::String(raw) => {
+            let raw = interpolate_string(raw, lookup)?;
+            raw.trim().parse::<f32>().map_err(|_| {
+                ConfigError::Validation(format!(
+                    "profile '{profile_name}' field '{field_name}' must be a valid number"
+                ))
+            })
+        }
         _ => Err(ConfigError::Validation(format!(
             "profile '{profile_name}' field '{field_name}' must be a string or number"
         ))),
@@ -326,6 +338,7 @@ fn required_profile_u32(
     profile_name: &str,
     table: &Table,
     field_name: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<u32, ConfigError> {
     let value = table.get(field_name).ok_or_else(|| {
         ConfigError::Validation(format!(
@@ -333,17 +346,24 @@ fn required_profile_u32(
         ))
     })?;
 
-    let Some(number) = value.as_integer() else {
-        return Err(ConfigError::Validation(format!(
+    match value {
+        Value::Integer(number) => u32::try_from(*number).map_err(|_| {
+            ConfigError::Validation(format!(
+                "profile '{profile_name}' field '{field_name}' must fit within a u32"
+            ))
+        }),
+        Value::String(raw) => {
+            let raw = interpolate_string(raw, lookup)?;
+            raw.trim().parse::<u32>().map_err(|_| {
+                ConfigError::Validation(format!(
+                    "profile '{profile_name}' field '{field_name}' must be an integer"
+                ))
+            })
+        }
+        _ => Err(ConfigError::Validation(format!(
             "profile '{profile_name}' field '{field_name}' must be an integer"
-        )));
-    };
-
-    u32::try_from(number).map_err(|_| {
-        ConfigError::Validation(format!(
-            "profile '{profile_name}' field '{field_name}' must fit within a u32"
-        ))
-    })
+        ))),
+    }
 }
 
 fn validate_non_empty(
@@ -373,31 +393,6 @@ fn validate_http_url(profile_name: &str, field_name: &str, value: &str) -> Resul
 
 fn is_ollama_chat_endpoint(base_url: &str) -> bool {
     base_url.trim_end_matches('/').ends_with("/api/chat")
-}
-
-fn interpolate_toml_value(
-    value: &mut Value,
-    lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<(), ConfigError> {
-    match value {
-        Value::String(content) => {
-            *content = interpolate_string(content, lookup)?;
-            Ok(())
-        }
-        Value::Array(items) => {
-            for item in items {
-                interpolate_toml_value(item, lookup)?;
-            }
-            Ok(())
-        }
-        Value::Table(table) => {
-            for (_, item) in table.iter_mut() {
-                interpolate_toml_value(item, lookup)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
 }
 
 fn interpolate_string(
@@ -437,6 +432,29 @@ fn interpolate_string(
 
     output.push_str(&input[cursor..]);
     Ok(output)
+}
+
+fn interpolate_optional_string(
+    input: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, ConfigError> {
+    let trimmed = input.trim();
+    if let Some(variable_name) = trimmed
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+    {
+        if variable_name.is_empty() {
+            return Err(ConfigError::Interpolation(
+                "environment placeholder must not be empty".to_owned(),
+            ));
+        }
+
+        return Ok(lookup(variable_name)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()));
+    }
+
+    interpolate_string(input, lookup).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -598,6 +616,36 @@ mod tests {
         assert_eq!(
             profile.base_url,
             "https://platform.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn bitloops_platform_driver_allows_missing_optional_api_key_env() {
+        let config = parse_config(
+            r#"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 300
+
+                [inference.profiles.platform_summary]
+                task = "text_generation"
+                driver = "bitloops_platform_chat"
+                runtime = "bitloops_inference"
+                model = "ministral-3-3b-instruct"
+                api_key = "${BITLOOPS_PLATFORM_GATEWAY_TOKEN}"
+                temperature = "0.1"
+                max_output_tokens = 200
+            "#,
+            &|_| None,
+        )
+        .expect("config should parse");
+
+        let profile = config
+            .profile("platform_summary")
+            .expect("profile should exist");
+        assert_eq!(profile.api_key, None);
+        assert_eq!(
+            profile.base_url,
+            DEFAULT_BITLOOPS_PLATFORM_CHAT_COMPLETIONS_URL
         );
     }
 
