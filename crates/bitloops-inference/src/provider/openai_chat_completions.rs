@@ -155,6 +155,7 @@ mod tests {
 
     fn profile() -> ProfileConfig {
         ProfileConfig {
+            task: crate::config::ProfileTask::TextGeneration,
             kind: ProviderKind::OpenAiChatCompletions,
             provider_name: "openai".to_owned(),
             model: "gpt-4.1-mini".to_owned(),
@@ -163,6 +164,9 @@ mod tests {
             temperature: Some(0.1),
             timeout_secs: 60,
             max_output_tokens: Some(200),
+            runtime_command: None,
+            runtime_args: Vec::new(),
+            startup_timeout_secs: 60,
         }
     }
 

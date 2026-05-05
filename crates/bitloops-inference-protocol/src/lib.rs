@@ -12,6 +12,8 @@ pub enum ProviderKind {
     #[serde(rename = "openai_chat_completions")]
     OpenAiChatCompletions,
     OllamaChat,
+    CodexExec,
+    ClaudeCodePrint,
 }
 
 impl ProviderKind {
@@ -19,6 +21,8 @@ impl ProviderKind {
         match self {
             Self::OpenAiChatCompletions => "openai_chat_completions",
             Self::OllamaChat => "ollama_chat",
+            Self::CodexExec => "codex_exec",
+            Self::ClaudeCodePrint => "claude_code_print",
         }
     }
 }
@@ -130,6 +134,8 @@ pub struct ProviderMetadata {
 pub struct ProviderCapabilities {
     pub response_modes: Vec<ResponseMode>,
     pub usage_reporting: bool,
+    #[serde(default)]
+    pub structured_output: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

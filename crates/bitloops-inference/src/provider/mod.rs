@@ -1,3 +1,4 @@
+mod cli_agent;
 mod ollama_chat;
 mod openai_chat_completions;
 
@@ -12,6 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::config::ProfileConfig;
 use crate::json::extract_json_object;
 
+pub use cli_agent::{ClaudeCodePrintProvider, CodexExecProvider};
 pub use ollama_chat::OllamaChatProvider;
 pub use openai_chat_completions::OpenAiChatCompletionsProvider;
 
@@ -56,6 +58,12 @@ impl Default for ProviderRegistry {
         });
         factories.insert(ProviderKind::OllamaChat, |profile| {
             Ok(Box::new(OllamaChatProvider::new(profile.clone())))
+        });
+        factories.insert(ProviderKind::CodexExec, |profile| {
+            Ok(Box::new(CodexExecProvider::new(profile.clone())))
+        });
+        factories.insert(ProviderKind::ClaudeCodePrint, |profile| {
+            Ok(Box::new(ClaudeCodePrintProvider::new(profile.clone())))
         });
         Self { factories }
     }
@@ -154,6 +162,7 @@ pub(crate) fn default_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         response_modes: vec![ResponseMode::Text, ResponseMode::JsonObject],
         usage_reporting: true,
+        structured_output: Vec::new(),
     }
 }
 

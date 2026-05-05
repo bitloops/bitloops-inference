@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod json;
+mod perf;
 mod provider;
 mod runtime;
 
@@ -15,6 +16,8 @@ use crate::cli::Command;
 use crate::config::InferenceConfig;
 use crate::provider::ProviderRegistry;
 use crate::runtime::Runtime;
+
+pub use crate::perf::{PerfError, run_perf_report_from_env};
 
 pub fn run_from_args<I, T>(args: I) -> Result<(), AppError>
 where

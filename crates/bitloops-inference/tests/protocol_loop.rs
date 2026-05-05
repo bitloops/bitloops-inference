@@ -13,6 +13,7 @@ use bitloops_inference_protocol::{
     ResponsePayload, ShutdownRequest,
 };
 use mockito::Server;
+use serde_json::json;
 
 use common::write_config;
 
@@ -297,6 +298,83 @@ fn malformed_json_object_is_reported() {
 
     runtime.finish();
     mock.assert();
+}
+
+#[test]
+fn codex_exec_runtime_returns_normalised_parsed_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let script = temp.path().join("fake-codex.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+result=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    result="$1"
+  fi
+  shift || true
+done
+printf '{"summary":"ok","risk_level":"low","recommended_actions":[]}' > "$result"
+"#,
+    )
+    .expect("write fake codex");
+    let config = write_config(&format!(
+        r#"
+            [inference.runtimes.codex]
+            command = "/bin/sh"
+            args = ["{}"]
+            startup_timeout_secs = 5
+            request_timeout_secs = 30
+
+            [inference.profiles.local_agent]
+            task = "structured_generation"
+            driver = "codex_exec"
+            runtime = "codex"
+            model = "gpt-5.4-mini"
+            temperature = "0.1"
+            max_output_tokens = 4096
+        "#,
+        script.display()
+    ));
+
+    let mut runtime = RuntimeHarness::spawn(config.path(), "local_agent");
+    runtime.send(&RequestEnvelope {
+        request_id: "infer-structured".to_owned(),
+        payload: RequestPayload::Infer(InferRequest {
+            system_prompt: "system".to_owned(),
+            user_prompt: "user".to_owned(),
+            response_mode: ResponseMode::JsonObject,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Some(serde_json::Map::from_iter([(
+                "json_schema".to_string(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": { "type": "string" }
+                    },
+                    "required": ["summary"]
+                }),
+            )])),
+        }),
+    });
+    let response = runtime.read();
+    match response.payload {
+        ResponsePayload::Infer(infer) => {
+            assert_eq!(infer.provider_name, "codex");
+            assert_eq!(infer.parsed_json.expect("json")["summary"], "ok");
+        }
+        other => panic!("expected infer response, got {other:?}"),
+    }
+
+    runtime.send(&RequestEnvelope {
+        request_id: "shutdown-1".to_owned(),
+        payload: RequestPayload::Shutdown(ShutdownRequest {}),
+    });
+    let shutdown = runtime.read();
+    assert!(matches!(shutdown.payload, ResponsePayload::Shutdown(_)));
+    runtime.finish();
 }
 
 #[test]

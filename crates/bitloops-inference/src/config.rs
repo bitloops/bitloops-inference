@@ -10,6 +10,8 @@ use toml::{Table, Value};
 const BITLOOPS_PLATFORM_CHAT_DRIVER: &str = "bitloops_platform_chat";
 const DEFAULT_BITLOOPS_PLATFORM_CHAT_COMPLETIONS_URL: &str =
     "https://platform.bitloops.net/v1/chat/completions";
+const DEFAULT_RUNTIME_STARTUP_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InferenceConfig {
@@ -57,7 +59,13 @@ impl InferenceConfig {
         for (name, raw_profile) in raw.inference.profiles {
             reject_legacy_profile_fields(&name, &raw_profile)?;
             let task = required_profile_string(&name, &raw_profile, "task", lookup)?;
-            if task != "text_generation" {
+            if !matches!(
+                task.as_str(),
+                "text_generation"
+                    | "text-generation"
+                    | "structured_generation"
+                    | "structured-generation"
+            ) {
                 continue;
             }
 
@@ -68,7 +76,7 @@ impl InferenceConfig {
 
         if profiles.is_empty() {
             return Err(ConfigError::Validation(
-                "config must define at least one text_generation profile under [inference.profiles.<name>]"
+                "config must define at least one text_generation or structured_generation profile under [inference.profiles.<name>]"
                     .to_owned(),
             ));
         }
@@ -79,6 +87,7 @@ impl InferenceConfig {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfileConfig {
+    pub task: ProfileTask,
     pub kind: ProviderKind,
     pub provider_name: String,
     pub model: String,
@@ -87,6 +96,34 @@ pub struct ProfileConfig {
     pub temperature: Option<f32>,
     pub timeout_secs: u64,
     pub max_output_tokens: Option<u32>,
+    pub runtime_command: Option<String>,
+    pub runtime_args: Vec<String>,
+    pub startup_timeout_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfileTask {
+    TextGeneration,
+    StructuredGeneration,
+}
+
+impl ProfileTask {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TextGeneration => "text_generation",
+            Self::StructuredGeneration => "structured_generation",
+        }
+    }
+}
+
+fn parse_profile_task(profile_name: &str, raw: &str) -> Result<ProfileTask, ConfigError> {
+    match raw {
+        "text_generation" | "text-generation" => Ok(ProfileTask::TextGeneration),
+        "structured_generation" | "structured-generation" => Ok(ProfileTask::StructuredGeneration),
+        other => Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field 'task' has unsupported value '{other}'"
+        ))),
+    }
 }
 
 impl ProfileConfig {
@@ -114,25 +151,29 @@ impl ProfileConfig {
             ],
         )?;
 
-        let task = required_profile_string(profile_name, raw, "task", lookup)?;
-        if task != "text_generation" {
-            return Err(ConfigError::Validation(format!(
-                "profile '{profile_name}' field 'task' must be 'text_generation'"
-            )));
-        }
+        let task = parse_profile_task(
+            profile_name,
+            &required_profile_string(profile_name, raw, "task", lookup)?,
+        )?;
 
         let driver = required_profile_string(profile_name, raw, "driver", lookup)?;
         let driver_spec = provider_for_driver(profile_name, &driver)?;
 
         let model = required_profile_string(profile_name, raw, "model", lookup)?;
-        let base_url = resolve_base_url(profile_name, raw, driver_spec.default_base_url, lookup)?;
-        validate_http_url(profile_name, "base_url", &base_url)?;
+        let base_url = if driver_spec.requires_base_url {
+            let base_url =
+                resolve_base_url(profile_name, raw, driver_spec.default_base_url, lookup)?;
+            validate_http_url(profile_name, "base_url", &base_url)?;
 
-        if driver_spec.kind == ProviderKind::OllamaChat && !is_ollama_chat_endpoint(&base_url) {
-            return Err(ConfigError::Validation(format!(
-                "profile '{profile_name}' field 'base_url' must target the Ollama chat endpoint '/api/chat'"
-            )));
-        }
+            if driver_spec.kind == ProviderKind::OllamaChat && !is_ollama_chat_endpoint(&base_url) {
+                return Err(ConfigError::Validation(format!(
+                    "profile '{profile_name}' field 'base_url' must target the Ollama chat endpoint '/api/chat'"
+                )));
+            }
+            base_url
+        } else {
+            optional_profile_string(profile_name, raw, "base_url", lookup)?.unwrap_or_default()
+        };
 
         let api_key = optional_profile_string(profile_name, raw, "api_key", lookup)?;
         let temperature = required_profile_f32(profile_name, raw, "temperature", lookup)?;
@@ -156,18 +197,40 @@ impl ProfileConfig {
                 "profile '{profile_name}' references unknown runtime '{runtime_name}'"
             ))
         })?;
-        let timeout_secs = runtime.request_timeout_secs.ok_or_else(|| {
-            ConfigError::Validation(format!(
-                "runtime '{runtime_name}' field 'request_timeout_secs' is required by profile '{profile_name}'"
-            ))
-        })?;
+        let timeout_secs = runtime
+            .request_timeout_secs
+            .unwrap_or(DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECS);
         if timeout_secs == 0 {
             return Err(ConfigError::Validation(format!(
                 "runtime '{runtime_name}' field 'request_timeout_secs' must be greater than 0"
             )));
         }
+        let startup_timeout_secs = runtime
+            .startup_timeout_secs
+            .unwrap_or(DEFAULT_RUNTIME_STARTUP_TIMEOUT_SECS);
+        if startup_timeout_secs == 0 {
+            return Err(ConfigError::Validation(format!(
+                "runtime '{runtime_name}' field 'startup_timeout_secs' must be greater than 0"
+            )));
+        }
+        let runtime_command = optional_runtime_string(&runtime.command, lookup)?;
+        if !driver_spec.requires_base_url && runtime_command.is_none() {
+            return Err(ConfigError::Validation(format!(
+                "runtime '{runtime_name}' field 'command' is required by profile '{profile_name}'"
+            )));
+        }
+        let runtime_args = runtime_args(&runtime.args, lookup)?;
+
+        if task != driver_spec.task {
+            return Err(ConfigError::Validation(format!(
+                "profile '{profile_name}' uses driver '{driver}' for task '{}' but declared task '{}'",
+                driver_spec.task.as_str(),
+                task.as_str()
+            )));
+        }
 
         Ok(Self {
+            task,
             kind: driver_spec.kind,
             provider_name: driver_spec.provider_name.to_owned(),
             model,
@@ -176,6 +239,9 @@ impl ProfileConfig {
             temperature: Some(temperature),
             timeout_secs,
             max_output_tokens: Some(max_output_tokens),
+            runtime_command,
+            runtime_args,
+            startup_timeout_secs,
         })
     }
 }
@@ -185,6 +251,8 @@ struct DriverSpec {
     kind: ProviderKind,
     provider_name: &'static str,
     default_base_url: Option<&'static str>,
+    task: ProfileTask,
+    requires_base_url: bool,
 }
 
 fn provider_for_driver(profile_name: &str, driver: &str) -> Result<DriverSpec, ConfigError> {
@@ -193,16 +261,36 @@ fn provider_for_driver(profile_name: &str, driver: &str) -> Result<DriverSpec, C
             kind: ProviderKind::OllamaChat,
             provider_name: "ollama",
             default_base_url: None,
+            task: ProfileTask::TextGeneration,
+            requires_base_url: true,
         }),
         "openai_chat_completions" => Ok(DriverSpec {
             kind: ProviderKind::OpenAiChatCompletions,
             provider_name: "openai",
             default_base_url: None,
+            task: ProfileTask::TextGeneration,
+            requires_base_url: true,
         }),
         BITLOOPS_PLATFORM_CHAT_DRIVER => Ok(DriverSpec {
             kind: ProviderKind::OpenAiChatCompletions,
             provider_name: "bitloops",
             default_base_url: Some(DEFAULT_BITLOOPS_PLATFORM_CHAT_COMPLETIONS_URL),
+            task: ProfileTask::TextGeneration,
+            requires_base_url: true,
+        }),
+        "codex_exec" => Ok(DriverSpec {
+            kind: ProviderKind::CodexExec,
+            provider_name: "codex",
+            default_base_url: None,
+            task: ProfileTask::StructuredGeneration,
+            requires_base_url: false,
+        }),
+        "claude_code_print" => Ok(DriverSpec {
+            kind: ProviderKind::ClaudeCodePrint,
+            provider_name: "claude",
+            default_base_url: None,
+            task: ProfileTask::StructuredGeneration,
+            requires_base_url: false,
         }),
         other => Err(ConfigError::Validation(format!(
             "profile '{profile_name}' field 'driver' has unsupported value '{other}'"
@@ -457,6 +545,30 @@ fn interpolate_optional_string(
     interpolate_string(input, lookup).map(Some)
 }
 
+fn optional_runtime_string(
+    input: &Option<String>,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, ConfigError> {
+    let Some(input) = input.as_deref() else {
+        return Ok(None);
+    };
+    interpolate_optional_string(input, lookup)
+}
+
+fn runtime_args(
+    input: &[String],
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, ConfigError> {
+    input
+        .iter()
+        .filter_map(|arg| match interpolate_optional_string(arg, lookup) {
+            Ok(Some(value)) => Some(Ok(value)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     inference: RawInferenceConfig,
@@ -472,6 +584,12 @@ struct RawInferenceConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawRuntimeConfig {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    startup_timeout_secs: Option<u64>,
     #[serde(default)]
     request_timeout_secs: Option<u64>,
 }
@@ -647,6 +765,41 @@ mod tests {
             profile.base_url,
             DEFAULT_BITLOOPS_PLATFORM_CHAT_COMPLETIONS_URL
         );
+    }
+
+    #[test]
+    fn accepts_structured_generation_cli_profile() {
+        let config = parse_config(
+            r#"
+                [inference.runtimes.codex]
+                command = "codex"
+                args = ["--ask-for-approval", "never"]
+                startup_timeout_secs = 5
+                request_timeout_secs = 300
+
+                [inference.profiles.local_agent]
+                task = "structured_generation"
+                driver = "codex_exec"
+                runtime = "codex"
+                model = "gpt-5.4-mini"
+                temperature = "0.1"
+                max_output_tokens = 4096
+            "#,
+            &|_| None,
+        )
+        .expect("config should parse");
+
+        let profile = config.profile("local_agent").expect("profile should exist");
+        assert_eq!(config.profile_names(), vec!["local_agent".to_owned()]);
+        assert_eq!(profile.task, ProfileTask::StructuredGeneration);
+        assert_eq!(profile.kind, ProviderKind::CodexExec);
+        assert_eq!(profile.runtime_command.as_deref(), Some("codex"));
+        assert_eq!(
+            profile.runtime_args,
+            vec!["--ask-for-approval".to_string(), "never".to_string()]
+        );
+        assert_eq!(profile.startup_timeout_secs, 5);
+        assert_eq!(profile.timeout_secs, 300);
     }
 
     #[test]

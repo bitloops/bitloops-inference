@@ -13,6 +13,10 @@ fn validate_config_reports_text_generation_profile_names() {
             [inference.runtimes.bitloops_inference]
             request_timeout_secs = 60
 
+            [inference.runtimes.codex]
+            command = "codex"
+            request_timeout_secs = 300
+
             [inference.profiles.local_code]
             task = "embeddings"
             driver = "ollama_embeddings"
@@ -37,6 +41,14 @@ fn validate_config_reports_text_generation_profile_names() {
             base_url = "http://127.0.0.1:11434/api/chat"
             temperature = "0.1"
             max_output_tokens = 200
+
+            [inference.profiles.local_agent]
+            task = "structured_generation"
+            driver = "codex_exec"
+            runtime = "codex"
+            model = "gpt-5.4-mini"
+            temperature = "0.1"
+            max_output_tokens = 4096
         "#,
     );
 
@@ -51,8 +63,9 @@ fn validate_config_reports_text_generation_profile_names() {
     assert!(output.status.success());
     let stdout: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(stdout["status"], "ok");
-    assert_eq!(stdout["profiles"][0], "ollama_local");
-    assert_eq!(stdout["profiles"][1], "openai_fast");
+    assert_eq!(stdout["profiles"][0], "local_agent");
+    assert_eq!(stdout["profiles"][1], "ollama_local");
+    assert_eq!(stdout["profiles"][2], "openai_fast");
 }
 
 #[test]

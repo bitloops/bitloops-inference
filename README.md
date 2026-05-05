@@ -23,7 +23,7 @@ bitloops-inference describe-profile --config config.toml --profile openai_fast
 
 ## Config
 
-`bitloops-inference` reads the Bitloops daemon inference config. Text-generation profiles live under `[inference.profiles.<name>]` and reference a runtime from `[inference.runtimes.<name>]`.
+`bitloops-inference` reads the Bitloops daemon inference config. Text-generation and structured-generation profiles live under `[inference.profiles.<name>]` and reference a runtime from `[inference.runtimes.<name>]`.
 
 ```toml
 [inference.runtimes.bitloops_inference]
@@ -49,7 +49,7 @@ temperature = "0.1"
 max_output_tokens = 200
 ```
 
-String fields support `${ENV_VAR}` interpolation. Missing environment variables fail validation immediately. Non-text-generation profiles in the same daemon config are ignored by `bitloops-inference`.
+String fields support `${ENV_VAR}` interpolation. Missing environment variables fail validation immediately. Profiles unrelated to text or structured generation in the same daemon config are ignored by `bitloops-inference`.
 
 The public Bitloops platform gateway has a dedicated `bitloops_platform_chat` driver. It defaults to the production Bitloops platform endpoint, and the Bitloops host can optionally provide `base_url` when a test or non-production override is needed:
 
@@ -74,8 +74,30 @@ If `base_url` is omitted, `bitloops-inference` uses `https://platform.bitloops.n
 - `openai_chat_completions`
 - `bitloops_platform_chat`
 - `ollama_chat`
+- `codex_exec`
+- `claude_code_print`
 
-Both providers normalise their outputs into one canonical inference response with `text`, optional `parsed_json`, optional token usage, finish reason, provider name, and model name.
+All providers normalise their outputs into one canonical inference response with `text`, optional `parsed_json`, optional token usage, finish reason, provider name, and model name.
+
+Structured-generation CLI profiles use the runtime command and args directly:
+
+```toml
+[inference.runtimes.codex]
+command = "codex"
+args = []
+startup_timeout_secs = 5
+request_timeout_secs = 300
+
+[inference.profiles.local_agent]
+task = "structured_generation"
+driver = "codex_exec"
+runtime = "codex"
+model = "gpt-5.4-mini"
+temperature = "0.1"
+max_output_tokens = 4096
+```
+
+`codex_exec` writes a temporary JSON Schema file, runs `codex exec --output-schema <schema-file> --output-last-message <result-file>`, and returns the parsed result file as `parsed_json`. `claude_code_print` runs `claude -p --output-format json --allowedTools Read,Grep,Glob` and treats schema adherence as prompt-guided JSON rather than strict schema enforcement.
 
 ## How Bitloops calls it
 
@@ -130,6 +152,26 @@ The test suite avoids live network calls. Provider integrations use mocked HTTP 
 cargo nextest run
 cargo dev-clippy
 ```
+
+There is also an ad hoc manual performance runner that hits a live provider and prints JSON latency analytics, including per-request timings, min/max/mean/median, p95, p99, throughput, and token totals when the provider reports usage. It does not make assertions or act as part of the automated test suite. Each request appends a random cache-buster suffix to the prompt to reduce the chance of provider-side caching affecting the timings. It expects the worker count, prompt, run count, and token through environment variables:
+
+```bash
+BITLOOPS_INFERENCE_PERF_WORKERS=4 \
+BITLOOPS_INFERENCE_PERF_RUNS=20 \
+BITLOOPS_INFERENCE_PERF_PROMPT="Summarise the benefits of isolating provider logic." \
+BITLOOPS_PLATFORM_GATEWAY_TOKEN=... \
+cargo run -p bitloops-inference --bin bitloops-inference-perf
+```
+
+Optional overrides:
+
+- `BITLOOPS_INFERENCE_PERF_DRIVER`: `bitloops_platform_chat` (default) or `openai_chat_completions`
+- `BITLOOPS_INFERENCE_PERF_BASE_URL`: override the default provider endpoint
+- `BITLOOPS_INFERENCE_PERF_MODEL`: override the default model for the selected driver
+- `BITLOOPS_INFERENCE_PERF_SYSTEM_PROMPT`: override the default system prompt
+- `BITLOOPS_INFERENCE_PERF_TIMEOUT_SECS`
+- `BITLOOPS_INFERENCE_PERF_TEMPERATURE`
+- `BITLOOPS_INFERENCE_PERF_MAX_OUTPUT_TOKENS`
 
 ## CI and releases
 
