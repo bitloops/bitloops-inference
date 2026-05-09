@@ -1,5 +1,5 @@
 use bitloops_inference_protocol::{ProviderMetadata, ResponseMode, TokenUsage};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::config::ProfileConfig;
 use crate::provider::{
@@ -10,6 +10,10 @@ use crate::provider::{
 pub struct OpenAiChatCompletionsProvider {
     profile: ProfileConfig,
 }
+
+const BITLOOPS_PLATFORM_PROVIDER_NAME: &str = "bitloops";
+const REFRESH_CACHE_HEADER: &str = "X-Bitloops-Refresh-Cache";
+const REFRESH_CACHE_METADATA_FIELD: &str = "bitloops_refresh_cache";
 
 impl OpenAiChatCompletionsProvider {
     pub fn new(profile: ProfileConfig) -> Self {
@@ -39,6 +43,47 @@ impl OpenAiChatCompletionsProvider {
         }
 
         payload
+    }
+
+    fn build_headers(&self, refresh_cache: bool) -> Vec<(&'static str, String)> {
+        let mut headers = Vec::new();
+        if let Some(api_key) = &self.profile.api_key {
+            headers.push(("Authorization", format!("Bearer {api_key}")));
+        }
+        if refresh_cache {
+            headers.push((REFRESH_CACHE_HEADER, "true".to_owned()));
+        }
+        headers
+    }
+
+    fn infer_once(
+        &self,
+        request: &InferenceRequest,
+        refresh_cache: bool,
+    ) -> Result<InferenceResponse, ProviderError> {
+        let payload = self.build_payload(request);
+        let headers = self.build_headers(refresh_cache);
+
+        let body = post_json(
+            &self.profile.base_url,
+            self.profile.timeout_secs,
+            &headers,
+            &payload,
+        )?;
+
+        self.parse_response(body, request.response_mode)
+    }
+
+    fn should_retry_with_cache_refresh(
+        &self,
+        request: &InferenceRequest,
+        error: &ProviderError,
+        already_refreshed: bool,
+    ) -> bool {
+        !already_refreshed
+            && self.profile.provider_name == BITLOOPS_PLATFORM_PROVIDER_NAME
+            && request.response_mode == ResponseMode::JsonObject
+            && error.code == "invalid_provider_response"
     }
 
     fn parse_response(
@@ -99,21 +144,25 @@ impl InferenceProvider for OpenAiChatCompletionsProvider {
     }
 
     fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse, ProviderError> {
-        let payload = self.build_payload(request);
-        let mut headers = Vec::new();
-        if let Some(api_key) = &self.profile.api_key {
-            headers.push(("Authorization", format!("Bearer {api_key}")));
+        let refresh_cache = metadata_requests_refresh_cache(request.metadata.as_ref());
+        match self.infer_once(request, refresh_cache) {
+            Ok(response) => Ok(response),
+            Err(error) if self.should_retry_with_cache_refresh(request, &error, refresh_cache) => {
+                self.infer_once(request, true)
+            }
+            Err(error) => Err(error),
         }
-
-        let body = post_json(
-            &self.profile.base_url,
-            self.profile.timeout_secs,
-            &headers,
-            &payload,
-        )?;
-
-        self.parse_response(body, request.response_mode)
     }
+}
+
+fn metadata_requests_refresh_cache(metadata: Option<&Map<String, Value>>) -> bool {
+    metadata
+        .and_then(|metadata| metadata.get(REFRESH_CACHE_METADATA_FIELD))
+        .is_some_and(|value| match value {
+            Value::Bool(value) => *value,
+            Value::String(value) => value.eq_ignore_ascii_case("true"),
+            _ => false,
+        })
 }
 
 fn extract_message_content(choice: &Value) -> Option<String> {
@@ -170,6 +219,14 @@ mod tests {
         }
     }
 
+    fn bitloops_profile() -> ProfileConfig {
+        ProfileConfig {
+            provider_name: "bitloops".to_owned(),
+            base_url: "https://platform.example.com/v1/chat/completions".to_owned(),
+            ..profile()
+        }
+    }
+
     fn request(response_mode: ResponseMode) -> InferenceRequest {
         InferenceRequest {
             system_prompt: "You summarise diffs.".to_owned(),
@@ -178,6 +235,16 @@ mod tests {
             temperature: 0.1,
             max_output_tokens: 200,
             metadata: None,
+        }
+    }
+
+    fn request_with_metadata(
+        response_mode: ResponseMode,
+        metadata: Map<String, Value>,
+    ) -> InferenceRequest {
+        InferenceRequest {
+            metadata: Some(metadata),
+            ..request(response_mode)
         }
     }
 
@@ -191,6 +258,73 @@ mod tests {
         assert_eq!(payload["messages"][1]["role"], "user");
         assert_eq!(payload["stream"], false);
         assert_eq!(payload["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn builds_text_mode_payload_without_response_format() {
+        let provider = OpenAiChatCompletionsProvider::new(profile());
+        let payload = provider.build_payload(&request(ResponseMode::Text));
+
+        assert_eq!(payload["model"], "gpt-4.1-mini");
+        assert!(payload.get("response_format").is_none());
+    }
+
+    #[test]
+    fn metadata_refresh_flag_adds_refresh_cache_header() {
+        let provider = OpenAiChatCompletionsProvider::new(profile());
+        let request = request_with_metadata(
+            ResponseMode::Text,
+            Map::from_iter([(REFRESH_CACHE_METADATA_FIELD.to_owned(), json!(true))]),
+        );
+
+        let headers =
+            provider.build_headers(metadata_requests_refresh_cache(request.metadata.as_ref()));
+
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| *name == REFRESH_CACHE_HEADER && value == "true")
+        );
+    }
+
+    #[test]
+    fn openai_profile_does_not_refresh_cache_by_default() {
+        let provider = OpenAiChatCompletionsProvider::new(profile());
+
+        let headers = provider.build_headers(metadata_requests_refresh_cache(
+            request(ResponseMode::JsonObject).metadata.as_ref(),
+        ));
+
+        assert!(
+            headers
+                .iter()
+                .all(|(name, _)| *name != REFRESH_CACHE_HEADER)
+        );
+    }
+
+    #[test]
+    fn bitloops_json_parse_failure_retries_once_with_refresh_cache() {
+        let provider = OpenAiChatCompletionsProvider::new(bitloops_profile());
+        let request = request(ResponseMode::JsonObject);
+        let error = ProviderError::invalid_provider_response(
+            "provider response did not contain JSON",
+            None,
+        );
+
+        assert!(provider.should_retry_with_cache_refresh(&request, &error, false));
+        assert!(!provider.should_retry_with_cache_refresh(&request, &error, true));
+    }
+
+    #[test]
+    fn openai_json_parse_failure_does_not_retry_with_refresh_cache_by_default() {
+        let provider = OpenAiChatCompletionsProvider::new(profile());
+        let request = request(ResponseMode::JsonObject);
+        let error = ProviderError::invalid_provider_response(
+            "provider response did not contain JSON",
+            None,
+        );
+
+        assert!(!provider.should_retry_with_cache_refresh(&request, &error, false));
     }
 
     #[test]
