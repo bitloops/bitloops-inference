@@ -29,8 +29,19 @@ impl CodexExecProvider {
     ) -> Result<CliCommand, ProviderError> {
         let command = self.runtime_command()?;
         let mut args = self.profile.runtime_args.clone();
+        args.push("exec".to_string());
+        if let Some(thinking_level) = self.profile.thinking_level {
+            let Some(effort) = thinking_level.codex_reasoning_effort() else {
+                return Err(ProviderError::invalid_config(
+                    "codex_exec does not support thinking_level 'max'",
+                ));
+            };
+            args.extend([
+                "-c".to_string(),
+                format!("model_reasoning_effort=\"{effort}\""),
+            ]);
+        }
         args.extend([
-            "exec".to_string(),
             "--model".to_string(),
             self.profile.model.clone(),
             "--sandbox".to_string(),
@@ -447,6 +458,40 @@ mod tests {
         assert!(command.args.contains(&"/tmp/result.json".to_string()));
         assert_eq!(command.cwd.as_deref(), Some(Path::new("/tmp/repo")));
         assert_eq!(command.stdin, None);
+    }
+
+    #[test]
+    fn codex_exec_passes_configured_thinking_level() {
+        let mut profile = profile(ProviderKind::CodexExec, "codex", &[]);
+        profile.thinking_level = Some(crate::config::ThinkingLevel::ExtraHigh);
+        let provider = CodexExecProvider::new(profile);
+        let command = provider
+            .build_command(
+                &request(),
+                Path::new("/tmp/schema.json"),
+                Path::new("/tmp/result.json"),
+            )
+            .expect("command");
+
+        assert_eq!(command.command, "codex");
+        assert_eq!(
+            command.args,
+            vec![
+                "exec".to_string(),
+                "-c".to_string(),
+                "model_reasoning_effort=\"xhigh\"".to_string(),
+                "--model".to_string(),
+                "model".to_string(),
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--ephemeral".to_string(),
+                "--output-schema".to_string(),
+                "/tmp/schema.json".to_string(),
+                "--output-last-message".to_string(),
+                "/tmp/result.json".to_string(),
+                "system\n\nuser".to_string(),
+            ]
+        );
     }
 
     #[test]
