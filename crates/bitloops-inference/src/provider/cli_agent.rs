@@ -402,6 +402,7 @@ mod tests {
             temperature: Some(0.1),
             timeout_secs: 30,
             max_output_tokens: Some(4096),
+            thinking_level: None,
             runtime_command: Some(command.to_string()),
             runtime_args: args.iter().map(|arg| arg.to_string()).collect(),
             startup_timeout_secs: 5,
