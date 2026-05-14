@@ -23,3 +23,9 @@ target
 .claude
 .codex
 .opencode
+
+docs/superpowers/*
+
+docs/superpowers/plans/*
+
+docs/superpowers/specs/*
