@@ -97,7 +97,7 @@ temperature = "0.1"
 max_output_tokens = 4096
 ```
 
-`codex_exec` writes a temporary JSON Schema file, runs `codex exec --output-schema <schema-file> --output-last-message <result-file>`, and returns the parsed result file as `parsed_json`. `claude_code_print` runs `claude -p --output-format json --allowedTools Read,Grep,Glob` and treats schema adherence as prompt-guided JSON rather than strict schema enforcement.
+`codex_exec` writes a temporary JSON Schema file, runs `codex exec --output-schema <schema-file> --output-last-message <result-file>`, and returns the parsed result file as `parsed_json`. `claude_code_print` runs `claude -p --model <model> --output-format json --input-format text --json-schema <schema> --allowedTools Read,Grep,Glob`, writes the combined prompt to stdin, and returns Claude Code's JSON output as `parsed_json`. The `--json-schema` argument is included when the inference request metadata contains `json_schema`.
 
 ## How Bitloops calls it
 
