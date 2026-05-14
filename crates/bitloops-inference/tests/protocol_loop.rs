@@ -307,14 +307,24 @@ fn codex_exec_runtime_returns_normalised_parsed_json() {
     std::fs::write(
         &script,
         r#"#!/bin/sh
+thinking_level=""
 result=""
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--output-last-message" ]; then
+  if [ "$1" = "-c" ]; then
+    shift
+    thinking_level="$1"
+  elif [ "$1" = "--output-last-message" ]; then
     shift
     result="$1"
   fi
   shift || true
 done
+
+if [ "$thinking_level" != 'model_reasoning_effort="xhigh"' ]; then
+  echo "missing codex thinking level" >&2
+  exit 12
+fi
+
 printf '{"summary":"ok","risk_level":"low","recommended_actions":[]}' > "$result"
 "#,
     )
@@ -334,6 +344,7 @@ printf '{"summary":"ok","risk_level":"low","recommended_actions":[]}' > "$result
             model = "gpt-5.4-mini"
             temperature = "0.1"
             max_output_tokens = 4096
+            thinking_level = "extra_high"
         "#,
         script.display()
     ));
@@ -387,6 +398,7 @@ fn claude_code_print_runtime_passes_prompt_model_and_schema() {
 model=""
 schema=""
 allowed_tools=""
+effort=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --model)
@@ -400,6 +412,10 @@ while [ "$#" -gt 0 ]; do
     --allowedTools|--allowed-tools)
       shift
       allowed_tools="$1"
+      ;;
+    --effort)
+      shift
+      effort="$1"
       ;;
   esac
   shift || true
@@ -417,6 +433,11 @@ esac
 if [ "$model" != "claude-haiku-4-5" ]; then
   echo "missing model" >&2
   exit 9
+fi
+
+if [ "$effort" != "max" ]; then
+  echo "missing effort" >&2
+  exit 13
 fi
 
 case "$schema" in
@@ -452,6 +473,7 @@ printf '%s' '{"result":"{\"summary\":\"ok\",\"risk_level\":\"low\"}"}'
             model = "claude-haiku-4-5"
             temperature = "0.1"
             max_output_tokens = 4096
+            thinking_level = "max"
         "#,
         script.display()
     ));
