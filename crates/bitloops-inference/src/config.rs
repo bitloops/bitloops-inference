@@ -223,8 +223,13 @@ impl ProfileConfig {
                 "profile '{profile_name}' field 'max_output_tokens' must be greater than 0"
             )));
         }
-        let thinking_level =
-            optional_thinking_level(profile_name, raw, "thinking_level", driver_spec.kind, lookup)?;
+        let thinking_level = optional_thinking_level(
+            profile_name,
+            raw,
+            "thinking_level",
+            driver_spec.kind,
+            lookup,
+        )?;
 
         let runtime_name = required_profile_string(profile_name, raw, "runtime", lookup)?;
         let runtime = runtimes.get(&runtime_name).ok_or_else(|| {

@@ -310,17 +310,17 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
     let mut stdin_result: Option<Result<(), String>> = None;
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        if stdin_result.is_none() {
-            if let Some(receiver) = &stdin_result_receiver {
-                match receiver.try_recv() {
-                    Ok(result) => stdin_result = Some(result),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        stdin_result = Some(Err(format!(
-                            "failed to write stdin to CLI agent `{}`: stdin writer stopped",
-                            command.command
-                        )));
-                    }
+        if stdin_result.is_none()
+            && let Some(receiver) = &stdin_result_receiver
+        {
+            match receiver.try_recv() {
+                Ok(result) => stdin_result = Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    stdin_result = Some(Err(format!(
+                        "failed to write stdin to CLI agent `{}`: stdin writer stopped",
+                        command.command
+                    )));
                 }
             }
         }
@@ -346,10 +346,10 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
         }
     }
 
-    if stdin_result.is_none() {
-        if let Some(receiver) = &stdin_result_receiver {
-            stdin_result = receiver.try_recv().ok();
-        }
+    if stdin_result.is_none()
+        && let Some(receiver) = &stdin_result_receiver
+    {
+        stdin_result = receiver.try_recv().ok();
     }
 
     let output = child.wait_with_output().map_err(|err| {
