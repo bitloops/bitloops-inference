@@ -307,14 +307,24 @@ fn codex_exec_runtime_returns_normalised_parsed_json() {
     std::fs::write(
         &script,
         r#"#!/bin/sh
+thinking_level=""
 result=""
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--output-last-message" ]; then
+  if [ "$1" = "-c" ]; then
+    shift
+    thinking_level="$1"
+  elif [ "$1" = "--output-last-message" ]; then
     shift
     result="$1"
   fi
   shift || true
 done
+
+if [ "$thinking_level" != 'model_reasoning_effort="xhigh"' ]; then
+  echo "missing codex thinking level" >&2
+  exit 12
+fi
+
 printf '{"summary":"ok","risk_level":"low","recommended_actions":[]}' > "$result"
 "#,
     )
@@ -334,6 +344,7 @@ printf '{"summary":"ok","risk_level":"low","recommended_actions":[]}' > "$result
             model = "gpt-5.4-mini"
             temperature = "0.1"
             max_output_tokens = 4096
+            thinking_level = "extra_high"
         "#,
         script.display()
     ));
@@ -363,6 +374,138 @@ printf '{"summary":"ok","risk_level":"low","recommended_actions":[]}' > "$result
     match response.payload {
         ResponsePayload::Infer(infer) => {
             assert_eq!(infer.provider_name, "codex");
+            assert_eq!(infer.parsed_json.expect("json")["summary"], "ok");
+        }
+        other => panic!("expected infer response, got {other:?}"),
+    }
+
+    runtime.send(&RequestEnvelope {
+        request_id: "shutdown-1".to_owned(),
+        payload: RequestPayload::Shutdown(ShutdownRequest {}),
+    });
+    let shutdown = runtime.read();
+    assert!(matches!(shutdown.payload, ResponsePayload::Shutdown(_)));
+    runtime.finish();
+}
+
+#[test]
+fn claude_code_print_runtime_passes_prompt_model_and_schema() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let script = temp.path().join("fake-claude.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+model=""
+schema=""
+allowed_tools=""
+effort=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model)
+      shift
+      model="$1"
+      ;;
+    --json-schema)
+      shift
+      schema="$1"
+      ;;
+    --allowedTools|--allowed-tools)
+      shift
+      allowed_tools="$1"
+      ;;
+    --effort)
+      shift
+      effort="$1"
+      ;;
+  esac
+  shift || true
+done
+
+prompt="$(cat)"
+case "$prompt" in
+  *system*user*) ;;
+  *)
+    echo "missing prompt on stdin" >&2
+    exit 8
+    ;;
+esac
+
+if [ "$model" != "claude-haiku-4-5" ]; then
+  echo "missing model" >&2
+  exit 9
+fi
+
+if [ "$effort" != "max" ]; then
+  echo "missing effort" >&2
+  exit 13
+fi
+
+case "$schema" in
+  *'"type":"object"'*) ;;
+  *)
+    echo "missing schema" >&2
+    exit 10
+    ;;
+esac
+
+if [ "$allowed_tools" != "Read,Grep,Glob" ]; then
+  echo "missing allowed tools" >&2
+  exit 11
+fi
+
+printf '%s' '{"result":"{\"summary\":\"ok\",\"risk_level\":\"low\"}"}'
+"#,
+    )
+    .expect("write fake claude");
+
+    let config = write_config(&format!(
+        r#"
+            [inference.runtimes.claude]
+            command = "/bin/sh"
+            args = ["{}"]
+            startup_timeout_secs = 5
+            request_timeout_secs = 30
+
+            [inference.profiles.local_agent]
+            task = "structured_generation"
+            driver = "claude_code_print"
+            runtime = "claude"
+            model = "claude-haiku-4-5"
+            temperature = "0.1"
+            max_output_tokens = 4096
+            thinking_level = "max"
+        "#,
+        script.display()
+    ));
+
+    let mut runtime = RuntimeHarness::spawn(config.path(), "local_agent");
+    runtime.send(&RequestEnvelope {
+        request_id: "infer-claude-structured".to_owned(),
+        payload: RequestPayload::Infer(InferRequest {
+            system_prompt: "system".to_owned(),
+            user_prompt: "user".to_owned(),
+            response_mode: ResponseMode::JsonObject,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Some(serde_json::Map::from_iter([(
+                "json_schema".to_string(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": { "type": "string" },
+                        "risk_level": { "type": "string" }
+                    },
+                    "required": ["summary", "risk_level"]
+                }),
+            )])),
+        }),
+    });
+
+    let response = runtime.read();
+    match response.payload {
+        ResponsePayload::Infer(infer) => {
+            assert_eq!(infer.provider_name, "claude");
+            assert_eq!(infer.model_name, "claude-haiku-4-5");
             assert_eq!(infer.parsed_json.expect("json")["summary"], "ok");
         }
         other => panic!("expected infer response, got {other:?}"),

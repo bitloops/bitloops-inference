@@ -95,9 +95,12 @@ runtime = "codex"
 model = "gpt-5.4-mini"
 temperature = "0.1"
 max_output_tokens = 4096
+thinking_level = "extra_high"
 ```
 
-`codex_exec` writes a temporary JSON Schema file, runs `codex exec --output-schema <schema-file> --output-last-message <result-file>`, and returns the parsed result file as `parsed_json`. `claude_code_print` runs `claude -p --output-format json --allowedTools Read,Grep,Glob` and treats schema adherence as prompt-guided JSON rather than strict schema enforcement.
+`thinking_level` is optional and only supported by local CLI-agent drivers. For `codex_exec`, supported values are `low`, `medium`, `high`, `extra_high`, and `xhigh`; both `extra_high` and `xhigh` run Codex with `model_reasoning_effort="xhigh"`. For `claude_code_print`, supported values are Claude Code's native effort names: `low`, `medium`, `high`, `xhigh`, and `max`.
+
+`codex_exec` writes a temporary JSON Schema file, runs `codex exec --output-schema <schema-file> --output-last-message <result-file>`, and returns the parsed result file as `parsed_json`. `claude_code_print` runs `claude -p --model <model> --output-format json --input-format text --json-schema <schema> --allowedTools Read,Grep,Glob`, writes the combined prompt to stdin, and returns Claude Code's JSON output as `parsed_json`. When `thinking_level` is present, it is passed as provider-specific CLI configuration. The `--json-schema` argument is included when the inference request metadata contains `json_schema`.
 
 ## How Bitloops calls it
 

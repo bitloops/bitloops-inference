@@ -287,6 +287,7 @@ impl PerfSettings {
             temperature: Some(self.temperature),
             timeout_secs: self.timeout_secs,
             max_output_tokens: Some(self.max_output_tokens),
+            thinking_level: None,
             runtime_command: None,
             runtime_args: Vec::new(),
             startup_timeout_secs: 60,

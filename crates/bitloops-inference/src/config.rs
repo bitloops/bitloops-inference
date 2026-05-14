@@ -96,9 +96,41 @@ pub struct ProfileConfig {
     pub temperature: Option<f32>,
     pub timeout_secs: u64,
     pub max_output_tokens: Option<u32>,
+    pub thinking_level: Option<ThinkingLevel>,
     pub runtime_command: Option<String>,
     pub runtime_args: Vec<String>,
     pub startup_timeout_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThinkingLevel {
+    Low,
+    Medium,
+    High,
+    ExtraHigh,
+    Max,
+}
+
+impl ThinkingLevel {
+    pub const fn codex_reasoning_effort(self) -> Option<&'static str> {
+        match self {
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::ExtraHigh => Some("xhigh"),
+            Self::Max => None,
+        }
+    }
+
+    pub const fn claude_effort(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::ExtraHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +180,7 @@ impl ProfileConfig {
                 "api_key",
                 "temperature",
                 "max_output_tokens",
+                "thinking_level",
             ],
         )?;
 
@@ -190,6 +223,13 @@ impl ProfileConfig {
                 "profile '{profile_name}' field 'max_output_tokens' must be greater than 0"
             )));
         }
+        let thinking_level = optional_thinking_level(
+            profile_name,
+            raw,
+            "thinking_level",
+            driver_spec.kind,
+            lookup,
+        )?;
 
         let runtime_name = required_profile_string(profile_name, raw, "runtime", lookup)?;
         let runtime = runtimes.get(&runtime_name).ok_or_else(|| {
@@ -239,6 +279,7 @@ impl ProfileConfig {
             temperature: Some(temperature),
             timeout_secs,
             max_output_tokens: Some(max_output_tokens),
+            thinking_level,
             runtime_command,
             runtime_args,
             startup_timeout_secs,
@@ -450,6 +491,62 @@ fn required_profile_u32(
         }
         _ => Err(ConfigError::Validation(format!(
             "profile '{profile_name}' field '{field_name}' must be an integer"
+        ))),
+    }
+}
+
+fn optional_thinking_level(
+    profile_name: &str,
+    table: &Table,
+    field_name: &str,
+    kind: ProviderKind,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<ThinkingLevel>, ConfigError> {
+    let Some(raw) = optional_profile_string(profile_name, table, field_name, lookup)? else {
+        return Ok(None);
+    };
+
+    match kind {
+        ProviderKind::CodexExec => parse_codex_thinking_level(profile_name, field_name, &raw),
+        ProviderKind::ClaudeCodePrint => parse_claude_thinking_level(profile_name, field_name, &raw),
+        ProviderKind::OpenAiChatCompletions | ProviderKind::OllamaChat => {
+            Err(ConfigError::Validation(format!(
+                "profile '{profile_name}' field '{field_name}' is only supported for local CLI-agent drivers"
+            )))
+        }
+    }
+    .map(Some)
+}
+
+fn parse_codex_thinking_level(
+    profile_name: &str,
+    field_name: &str,
+    raw: &str,
+) -> Result<ThinkingLevel, ConfigError> {
+    match raw {
+        "low" => Ok(ThinkingLevel::Low),
+        "medium" => Ok(ThinkingLevel::Medium),
+        "high" => Ok(ThinkingLevel::High),
+        "extra_high" | "xhigh" => Ok(ThinkingLevel::ExtraHigh),
+        other => Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' has unsupported value '{other}' for driver 'codex_exec'; supported values are low, medium, high, extra_high, xhigh"
+        ))),
+    }
+}
+
+fn parse_claude_thinking_level(
+    profile_name: &str,
+    field_name: &str,
+    raw: &str,
+) -> Result<ThinkingLevel, ConfigError> {
+    match raw {
+        "low" => Ok(ThinkingLevel::Low),
+        "medium" => Ok(ThinkingLevel::Medium),
+        "high" => Ok(ThinkingLevel::High),
+        "xhigh" => Ok(ThinkingLevel::ExtraHigh),
+        "max" => Ok(ThinkingLevel::Max),
+        other => Err(ConfigError::Validation(format!(
+            "profile '{profile_name}' field '{field_name}' has unsupported value '{other}' for driver 'claude_code_print'; supported values are low, medium, high, xhigh, max"
         ))),
     }
 }
@@ -800,6 +897,142 @@ mod tests {
         );
         assert_eq!(profile.startup_timeout_secs, 5);
         assert_eq!(profile.timeout_secs, 300);
+    }
+
+    #[test]
+    fn accepts_codex_thinking_level_extra_high() {
+        let config = parse_config(
+            r#"
+                [inference.runtimes.codex]
+                command = "codex"
+                startup_timeout_secs = 5
+                request_timeout_secs = 300
+
+                [inference.profiles.local_agent]
+                task = "structured_generation"
+                driver = "codex_exec"
+                runtime = "codex"
+                model = "gpt-5.4-mini"
+                temperature = "0.1"
+                max_output_tokens = 4096
+                thinking_level = "extra_high"
+            "#,
+            &|_| None,
+        )
+        .expect("config should parse");
+
+        let profile = config.profile("local_agent").expect("profile should exist");
+        assert_eq!(profile.thinking_level, Some(ThinkingLevel::ExtraHigh));
+    }
+
+    #[test]
+    fn accepts_codex_native_xhigh_alias() {
+        let config = parse_config(
+            r#"
+                [inference.runtimes.codex]
+                command = "codex"
+                request_timeout_secs = 300
+
+                [inference.profiles.local_agent]
+                task = "structured_generation"
+                driver = "codex_exec"
+                runtime = "codex"
+                model = "gpt-5.4-mini"
+                temperature = "0.1"
+                max_output_tokens = 4096
+                thinking_level = "xhigh"
+            "#,
+            &|_| None,
+        )
+        .expect("config should parse");
+
+        let profile = config.profile("local_agent").expect("profile should exist");
+        assert_eq!(profile.thinking_level, Some(ThinkingLevel::ExtraHigh));
+    }
+
+    #[test]
+    fn accepts_claude_thinking_level_max() {
+        let config = parse_config(
+            r#"
+                [inference.runtimes.claude]
+                command = "claude"
+                startup_timeout_secs = 5
+                request_timeout_secs = 300
+
+                [inference.profiles.local_agent]
+                task = "structured_generation"
+                driver = "claude_code_print"
+                runtime = "claude"
+                model = "claude-opus-4-7"
+                temperature = "0.1"
+                max_output_tokens = 4096
+                thinking_level = "max"
+            "#,
+            &|_| None,
+        )
+        .expect("config should parse");
+
+        let profile = config.profile("local_agent").expect("profile should exist");
+        assert_eq!(profile.thinking_level, Some(ThinkingLevel::Max));
+    }
+
+    #[test]
+    fn rejects_unsupported_codex_thinking_level() {
+        let error = parse_config(
+            r#"
+                [inference.runtimes.codex]
+                command = "codex"
+                request_timeout_secs = 300
+
+                [inference.profiles.local_agent]
+                task = "structured_generation"
+                driver = "codex_exec"
+                runtime = "codex"
+                model = "gpt-5.4-mini"
+                temperature = "0.1"
+                max_output_tokens = 4096
+                thinking_level = "max"
+            "#,
+            &|_| None,
+        )
+        .expect_err("config should fail");
+
+        assert!(error.to_string().contains("thinking_level"));
+        assert!(error.to_string().contains("codex_exec"));
+        assert!(
+            error
+                .to_string()
+                .contains("low, medium, high, extra_high, xhigh")
+        );
+    }
+
+    #[test]
+    fn rejects_thinking_level_for_http_profiles() {
+        let error = parse_config(
+            r#"
+                [inference.runtimes.bitloops_inference]
+                request_timeout_secs = 120
+
+                [inference.profiles.summary_local]
+                task = "text_generation"
+                driver = "openai_chat_completions"
+                runtime = "bitloops_inference"
+                model = "gpt-4.1-mini"
+                base_url = "https://example.com/v1/chat/completions"
+                temperature = "0.1"
+                max_output_tokens = 200
+                thinking_level = "high"
+            "#,
+            &|_| None,
+        )
+        .expect_err("config should fail");
+
+        assert!(error.to_string().contains("thinking_level"));
+        assert!(
+            error
+                .to_string()
+                .contains("only supported for local CLI-agent drivers")
+        );
     }
 
     #[test]
