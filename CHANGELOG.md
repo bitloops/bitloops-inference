@@ -1,3 +1,48 @@
+## [0.1.6] - 2026-05-14
+
+### Added
+
+- `thinking_level` profile configuration for local CLI-agent drivers, including Codex `low`, `medium`, `high`, `extra_high`/`xhigh` values and Claude Code `low`, `medium`, `high`, `xhigh`, and `max` values.
+- Protocol-loop coverage for Codex and Claude Code thinking-level propagation.
+
+### Changed
+
+- `codex_exec` now passes configured thinking levels through Codex `model_reasoning_effort`.
+- `claude_code_print` now passes configured thinking levels through Claude Code `--effort`, includes the configured model, uses `--input-format text`, and forwards request JSON schemas with `--json-schema`.
+- `claude_code_print` now reports `json_schema` structured-output support.
+
+### Fixed
+
+- `claude_code_print` now writes the combined prompt to stdin instead of passing it as an argv value.
+- Claude Code local-agent responses now accept `result` as either a JSON string or a JSON object.
+
+## [0.1.5] - 2026-05-09
+
+### Added
+
+- Support for `bitloops_refresh_cache` request metadata, which sends `X-Bitloops-Refresh-Cache: true` to OpenAI-compatible chat-completions endpoints.
+- Unit coverage for explicit cache-refresh headers and one-time Bitloops platform cache-refresh retry decisions.
+
+### Fixed
+
+- Bitloops platform JSON-object parse failures now retry once with cache refresh before returning an invalid provider response.
+
+## [0.1.4] - 2026-05-04
+
+### Added
+
+- Structured-generation profile support alongside text-generation profiles.
+- Local CLI-agent providers for `codex_exec` and `claude_code_print`, including provider metadata, runtime command/argument handling, workspace-path support, JSON-schema handling, and normalized JSON responses.
+- `structured_output` provider capabilities in the protocol metadata.
+- Default runtime startup and request timeouts for CLI-backed profiles.
+- An ad hoc `bitloops-inference-perf` runner for live provider latency, throughput, and token-usage reporting.
+- Documentation for structured local CLI-agent profiles and the manual performance runner.
+
+### Changed
+
+- Config loading now accepts both underscore and hyphen spellings for supported profile tasks.
+- Config validation now checks task/driver compatibility and ignores daemon profiles unrelated to text or structured generation.
+
 ## [0.1.3] - 2026-04-17
 
 ### Added
