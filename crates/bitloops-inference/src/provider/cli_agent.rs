@@ -131,8 +131,14 @@ impl ClaudeCodePrintProvider {
     fn build_command(&self, request: &InferenceRequest) -> Result<CliCommand, ProviderError> {
         let command = self.runtime_command()?;
         let mut args = self.profile.runtime_args.clone();
+        args.push("-p".to_string());
+        if let Some(thinking_level) = self.profile.thinking_level {
+            args.extend([
+                "--effort".to_string(),
+                thinking_level.claude_effort().to_string(),
+            ]);
+        }
         args.extend([
-            "-p".to_string(),
             "--model".to_string(),
             self.profile.model.clone(),
             "--output-format".to_string(),
@@ -520,6 +526,36 @@ mod tests {
         );
         assert_eq!(command.stdin.as_deref(), Some("system\n\nuser"));
         assert_eq!(command.cwd.as_deref(), Some(Path::new("/tmp/repo")));
+    }
+
+    #[test]
+    fn claude_code_print_passes_configured_effort() {
+        let mut profile = profile(ProviderKind::ClaudeCodePrint, "claude", &[]);
+        profile.thinking_level = Some(crate::config::ThinkingLevel::Max);
+        let provider = ClaudeCodePrintProvider::new(profile);
+        let command = provider.build_command(&request()).expect("command");
+        let schema = serde_json::to_string(&json!({ "type": "object" })).expect("schema");
+
+        assert_eq!(command.command, "claude");
+        assert_eq!(
+            command.args,
+            vec![
+                "-p".to_string(),
+                "--effort".to_string(),
+                "max".to_string(),
+                "--model".to_string(),
+                "model".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+                "--input-format".to_string(),
+                "text".to_string(),
+                "--json-schema".to_string(),
+                schema,
+                "--allowedTools".to_string(),
+                "Read,Grep,Glob".to_string(),
+            ]
+        );
+        assert_eq!(command.stdin.as_deref(), Some("system\n\nuser"));
     }
 
     #[test]
