@@ -1,3 +1,9 @@
+## [0.1.7] - 2026-05-18
+
+### Fixed
+
+- Support for structured output on claude response
+
 ## [0.1.6] - 2026-05-14
 
 ### Added
