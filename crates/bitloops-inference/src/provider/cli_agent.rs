@@ -391,6 +391,21 @@ fn parse_cli_json(text: &str) -> Result<Value, ProviderError> {
 
 fn parse_claude_json(text: &str) -> Result<Value, ProviderError> {
     let outer = parse_cli_json(text)?;
+    if let Some(structured_output) = outer.get("structured_output") {
+        if structured_output.is_object() {
+            return Ok(structured_output.clone());
+        }
+
+        return Err(ProviderError::invalid_provider_response(
+            "Claude CLI structured_output field was not a JSON object",
+            Some(json!({
+                "field": "structured_output",
+                "value": structured_output.clone(),
+                "outer": outer.clone(),
+            })),
+        ));
+    }
+
     if let Some(result) = outer.get("result") {
         if let Some(result_text) = result.as_str() {
             return parse_cli_json(result_text);
@@ -721,5 +736,41 @@ mod tests {
         let parsed = parse_claude_json(r#"{"result":{"summary":"ok"}}"#).expect("claude json");
 
         assert_eq!(parsed["summary"], "ok");
+    }
+
+    #[test]
+    fn claude_structured_output_field_is_preferred() {
+        let parsed = parse_claude_json(
+            r#"{"result":"","structured_output":{"roles":[{"canonical_key":"http_route_handler"}]}}"#,
+        )
+        .expect("claude structured output");
+
+        assert_eq!(parsed["roles"][0]["canonical_key"], "http_route_handler");
+    }
+
+    #[test]
+    fn claude_structured_output_wins_over_prose_result() {
+        let parsed = parse_claude_json(
+            r#"{"result":"I've inferred roles...","structured_output":{"roles":[]}}"#,
+        )
+        .expect("claude structured output");
+
+        assert_eq!(parsed["roles"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn claude_structured_output_must_be_object() {
+        let error = parse_claude_json(r#"{"result":"{}","structured_output":"not-object"}"#)
+            .expect_err("non-object structured output should fail");
+
+        assert_eq!(error.code, "invalid_provider_response");
+        assert!(
+            error.message.contains("structured_output"),
+            "error should identify the malformed structured_output field: {}",
+            error.message
+        );
+        let details = error.details.expect("details");
+        assert_eq!(details["field"], "structured_output");
+        assert_eq!(details["value"], "not-object");
     }
 }
