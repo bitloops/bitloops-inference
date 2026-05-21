@@ -1,3 +1,15 @@
+## [0.1.8] - 2026-05-21
+
+### Fixed
+
+- Local CLI-agent providers now drain stdout and stderr while the child process runs, preventing verbose Codex or Claude Code executions from timing out because an output pipe filled before process exit.
+- CLI-agent failure diagnostics now keep bounded stdout and stderr captures and report whether either stream was truncated.
+- Truncated successful stdout from local CLI agents now returns a clear invalid-provider-response error instead of a misleading JSON parse failure.
+
+### Changed
+
+- Documented that Codex `temperature` and output-token settings are not emitted as unsupported CLI flags; runtime `args` remain the escape hatch for documented Codex config overrides.
+
 ## [0.1.7] - 2026-05-18
 
 ### Fixed

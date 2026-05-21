@@ -1,7 +1,8 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,9 @@ impl CodexExecProvider {
         let command = self.runtime_command()?;
         let mut args = self.profile.runtime_args.clone();
         args.push("exec".to_string());
+        // Codex CLI currently exposes reasoning effort as a config override. Other
+        // Bitloops profile fields such as temperature and max_output_tokens are not
+        // emitted here because Codex does not document stable config keys for them.
         if let Some(thinking_level) = self.profile.thinking_level {
             let Some(effort) = thinking_level.codex_reasoning_effort() else {
                 return Err(ProviderError::invalid_config(
@@ -103,6 +107,8 @@ impl InferenceProvider for CodexExecProvider {
                     Some(json!({ "path": result_path.display().to_string() })),
                 )
             })?
+        } else if output.stdout_truncated {
+            return Err(truncated_stdout_error("codex_exec", output.stdout));
         } else {
             output.stdout.clone()
         };
@@ -177,6 +183,9 @@ impl InferenceProvider for ClaudeCodePrintProvider {
     fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse, ProviderError> {
         let command = self.build_command(request)?;
         let output = run_cli_command(command, self.profile.timeout_secs)?;
+        if output.stdout_truncated {
+            return Err(truncated_stdout_error("claude_code_print", output.stdout));
+        }
         let parsed_json = parse_claude_json(&output.stdout)?;
 
         Ok(InferenceResponse {
@@ -221,6 +230,16 @@ struct CliCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliOutput {
     stdout: String,
+    stdout_truncated: bool,
+}
+
+const MAX_CLI_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
+const OUTPUT_COLLECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedStream {
+    text: String,
+    truncated: bool,
 }
 
 fn prompt_for_cli_agent(request: &InferenceRequest) -> String {
@@ -266,6 +285,68 @@ fn write_json_file(path: &Path, value: &Value) -> Result<(), ProviderError> {
     })
 }
 
+fn spawn_stream_reader<R>(
+    command_name: &str,
+    stream_name: &'static str,
+    mut stream: R,
+) -> mpsc::Receiver<Result<CapturedStream, String>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    let command_name = command_name.to_string();
+
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut truncated = false;
+        let mut buffer = [0_u8; 8192];
+
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let remaining = MAX_CLI_CAPTURE_BYTES.saturating_sub(bytes.len());
+                    if remaining > 0 {
+                        let keep = remaining.min(count);
+                        bytes.extend_from_slice(&buffer[..keep]);
+                    }
+                    if count > remaining {
+                        truncated = true;
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(Err(format!(
+                        "failed to read {stream_name} from CLI agent `{command_name}`: {err}"
+                    )));
+                    return;
+                }
+            }
+        }
+
+        let _ = sender.send(Ok(CapturedStream {
+            text: String::from_utf8_lossy(&bytes).to_string(),
+            truncated,
+        }));
+    });
+
+    receiver
+}
+
+fn collect_stream_output(
+    receiver: mpsc::Receiver<Result<CapturedStream, String>>,
+    command_name: &str,
+    stream_name: &str,
+) -> Result<CapturedStream, ProviderError> {
+    receiver
+        .recv_timeout(OUTPUT_COLLECT_TIMEOUT)
+        .map_err(|err| {
+            ProviderError::provider_transport_error(format!(
+                "failed to collect {stream_name} from CLI agent `{command_name}`: {err}"
+            ))
+        })?
+        .map_err(ProviderError::provider_transport_error)
+}
+
 fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, ProviderError> {
     let mut process = Command::new(&command.command);
     process.args(&command.args);
@@ -287,6 +368,22 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
         ))
     })?;
 
+    let child_stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::provider_transport_error(format!(
+            "failed to open stdout for CLI agent `{}`",
+            command.command
+        ))
+    })?;
+    let child_stderr = child.stderr.take().ok_or_else(|| {
+        ProviderError::provider_transport_error(format!(
+            "failed to open stderr for CLI agent `{}`",
+            command.command
+        ))
+    })?;
+
+    let stdout_receiver = spawn_stream_reader(&command.command, "stdout", child_stdout);
+    let stderr_receiver = spawn_stream_reader(&command.command, "stderr", child_stderr);
+
     let stdin_result_receiver = if let Some(stdin) = command.stdin {
         let mut child_stdin = child.stdin.take().ok_or_else(|| {
             ProviderError::provider_transport_error(format!(
@@ -295,7 +392,7 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
             ))
         })?;
         let command_name = command.command.clone();
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let result = child_stdin.write_all(stdin.as_bytes()).map_err(|err| {
                 format!("failed to write stdin to CLI agent `{command_name}`: {err}")
@@ -309,14 +406,14 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
 
     let mut stdin_result: Option<Result<(), String>> = None;
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
+    let status = loop {
         if stdin_result.is_none()
             && let Some(receiver) = &stdin_result_receiver
         {
             match receiver.try_recv() {
                 Ok(result) => stdin_result = Some(result),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
                     stdin_result = Some(Err(format!(
                         "failed to write stdin to CLI agent `{}`: stdin writer stopped",
                         command.command
@@ -326,7 +423,7 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
         }
 
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -344,7 +441,7 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
                 )));
             }
         }
-    }
+    };
 
     if stdin_result.is_none()
         && let Some(receiver) = &stdin_result_receiver
@@ -352,24 +449,21 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
         stdin_result = receiver.try_recv().ok();
     }
 
-    let output = child.wait_with_output().map_err(|err| {
-        ProviderError::provider_transport_error(format!(
-            "failed to collect CLI agent `{}` output: {err}",
-            command.command
-        ))
-    })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if !output.status.success() {
+    let stdout = collect_stream_output(stdout_receiver, &command.command, "stdout")?;
+    let stderr = collect_stream_output(stderr_receiver, &command.command, "stderr")?;
+
+    if !status.success() {
         return Err(ProviderError::invalid_provider_response(
             format!(
                 "CLI agent `{}` exited with status {}",
-                command.command, output.status
+                command.command, status
             ),
             Some(json!({
-                "status": output.status.to_string(),
-                "stdout": stdout,
-                "stderr": stderr,
+                "status": status.to_string(),
+                "stdout": stdout.text,
+                "stderr": stderr.text,
+                "stdout_truncated": stdout.truncated,
+                "stderr_truncated": stderr.truncated,
             })),
         ));
     }
@@ -377,7 +471,10 @@ fn run_cli_command(command: CliCommand, timeout_secs: u64) -> Result<CliOutput, 
         return Err(ProviderError::provider_transport_error(message));
     }
 
-    Ok(CliOutput { stdout })
+    Ok(CliOutput {
+        stdout: stdout.text,
+        stdout_truncated: stdout.truncated,
+    })
 }
 
 fn parse_cli_json(text: &str) -> Result<Value, ProviderError> {
@@ -387,6 +484,17 @@ fn parse_cli_json(text: &str) -> Result<Value, ProviderError> {
             Some(json!({ "text": text })),
         )
     })
+}
+
+fn truncated_stdout_error(provider_name: &str, stdout: String) -> ProviderError {
+    ProviderError::invalid_provider_response(
+        format!("{provider_name} stdout exceeded the CLI capture limit"),
+        Some(json!({
+            "stdout": stdout,
+            "stdout_truncated": true,
+            "max_capture_bytes": MAX_CLI_CAPTURE_BYTES,
+        })),
+    )
 }
 
 fn parse_claude_json(text: &str) -> Result<Value, ProviderError> {
@@ -516,6 +624,49 @@ mod tests {
     }
 
     #[test]
+    fn codex_exec_preserves_runtime_args_before_exec_subcommand() {
+        let provider = CodexExecProvider::new(profile(
+            ProviderKind::CodexExec,
+            "codex",
+            &["-c", "model_verbosity=\"low\""],
+        ));
+        let command = provider
+            .build_command(
+                &request(),
+                Path::new("/tmp/schema.json"),
+                Path::new("/tmp/result.json"),
+            )
+            .expect("command");
+
+        assert_eq!(
+            &command.args[..4],
+            &[
+                "-c".to_string(),
+                "model_verbosity=\"low\"".to_string(),
+                "exec".to_string(),
+                "--model".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_exec_does_not_emit_unsupported_temperature_or_token_args() {
+        let provider = CodexExecProvider::new(profile(ProviderKind::CodexExec, "codex", &[]));
+        let command = provider
+            .build_command(
+                &request(),
+                Path::new("/tmp/schema.json"),
+                Path::new("/tmp/result.json"),
+            )
+            .expect("command");
+
+        let joined = command.args.join(" ");
+        assert!(!joined.contains("temperature"));
+        assert!(!joined.contains("max_output_tokens"));
+        assert!(!joined.contains("model_max_output_tokens"));
+    }
+
+    #[test]
     fn claude_code_print_builds_stdin_command_with_model_schema_and_tools() {
         let provider =
             ClaudeCodePrintProvider::new(profile(ProviderKind::ClaudeCodePrint, "claude", &[]));
@@ -581,6 +732,18 @@ mod tests {
     }
 
     #[test]
+    fn truncated_stdout_error_includes_capture_limit() {
+        let error = truncated_stdout_error("claude_code_print", "partial".to_string());
+
+        assert_eq!(error.code, "invalid_provider_response");
+        assert!(error.message.contains("claude_code_print"));
+        let details = error.details.expect("details");
+        assert_eq!(details["stdout"], "partial");
+        assert_eq!(details["stdout_truncated"], true);
+        assert_eq!(details["max_capture_bytes"], MAX_CLI_CAPTURE_BYTES);
+    }
+
+    #[test]
     fn driver_failure_includes_status_and_stderr() {
         let error = run_cli_command(
             CliCommand {
@@ -604,6 +767,34 @@ mod tests {
     }
 
     #[test]
+    fn driver_failure_with_large_stderr_returns_bounded_diagnostics() {
+        let error = run_cli_command(
+            CliCommand {
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "echo stdout text; dd if=/dev/zero bs=1024 count=5120 2>/dev/null | tr '\\000' e >&2; exit 7".to_string(),
+                ],
+                cwd: None,
+                stdin: None,
+            },
+            5,
+        )
+        .expect_err("failing command should return provider error");
+
+        assert_eq!(error.code, "invalid_provider_response");
+        let details = error.details.expect("details");
+        assert!(details["status"].as_str().unwrap().contains('7'));
+        assert_eq!(details["stdout"], "stdout text\n");
+        assert_eq!(details["stdout_truncated"], false);
+        assert_eq!(details["stderr_truncated"], true);
+        assert_eq!(
+            details["stderr"].as_str().expect("stderr").len(),
+            MAX_CLI_CAPTURE_BYTES
+        );
+    }
+
+    #[test]
     fn run_cli_command_writes_configured_stdin() {
         let output = run_cli_command(
             CliCommand {
@@ -617,6 +808,45 @@ mod tests {
         .expect("command should receive stdin");
 
         assert_eq!(output.stdout, "system\n\nuser");
+    }
+
+    #[test]
+    fn run_cli_command_drains_large_stderr_before_waiting_for_exit() {
+        let output = run_cli_command(
+            CliCommand {
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "printf '{\"summary\":\"ok\"}'; dd if=/dev/zero bs=1024 count=1024 2>/dev/null | tr '\\000' x >&2".to_string(),
+                ],
+                cwd: None,
+                stdin: None,
+            },
+            2,
+        )
+        .expect("large stderr should not block child exit");
+
+        assert_eq!(output.stdout, "{\"summary\":\"ok\"}");
+    }
+
+    #[test]
+    fn run_cli_command_drains_large_stdout_before_waiting_for_exit() {
+        let output = run_cli_command(
+            CliCommand {
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "printf '{\"summary\":\"ok\"}\\n'; dd if=/dev/zero bs=1024 count=1024 2>/dev/null | tr '\\000' x".to_string(),
+                ],
+                cwd: None,
+                stdin: None,
+            },
+            2,
+        )
+        .expect("large stdout should not block child exit");
+
+        assert!(output.stdout.starts_with("{\"summary\":\"ok\"}\n"));
+        assert!(output.stdout.len() >= 1024 * 1024);
     }
 
     #[test]

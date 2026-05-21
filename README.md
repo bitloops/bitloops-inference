@@ -100,7 +100,9 @@ thinking_level = "extra_high"
 
 `thinking_level` is optional and only supported by local CLI-agent drivers. For `codex_exec`, supported values are `low`, `medium`, `high`, `extra_high`, and `xhigh`; both `extra_high` and `xhigh` run Codex with `model_reasoning_effort="xhigh"`. For `claude_code_print`, supported values are Claude Code's native effort names: `low`, `medium`, `high`, `xhigh`, and `max`.
 
-`codex_exec` writes a temporary JSON Schema file, runs `codex exec --output-schema <schema-file> --output-last-message <result-file>`, and returns the parsed result file as `parsed_json`. `claude_code_print` runs `claude -p --model <model> --output-format json --input-format text --json-schema <schema> --allowedTools Read,Grep,Glob`, writes the combined prompt to stdin, and returns Claude Code's JSON output as `parsed_json`. When `thinking_level` is present, it is passed as provider-specific CLI configuration. The `--json-schema` argument is included when the inference request metadata contains `json_schema`.
+`codex_exec` writes a temporary JSON Schema file, runs `codex exec --output-schema <schema-file> --output-last-message <result-file>`, and returns the parsed result file as `parsed_json`. `claude_code_print` runs `claude -p --model <model> --output-format json --input-format text --json-schema <schema> --allowedTools Read,Grep,Glob`, writes the combined prompt to stdin, and returns Claude Code's JSON output as `parsed_json`. When `thinking_level` is present, it is passed as provider-specific CLI configuration. Codex CLI config overrides that are not first-class Bitloops fields can be passed with runtime `args`; Bitloops does not emit unsupported Codex `temperature` or output-token flags. The `--json-schema` argument is included when the inference request metadata contains `json_schema`.
+
+Local CLI-agent stdout and stderr are drained while the child process is running, so verbose tools cannot block on full output pipes before exiting. Failure diagnostics include bounded stdout and stderr captures, with truncation flags when a stream exceeds the capture limit.
 
 ## How Bitloops calls it
 
